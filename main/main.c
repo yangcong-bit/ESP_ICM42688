@@ -24,6 +24,11 @@
  *   3. 加权互补滤波融合
  *   4. 异常值检测 & 单路降级
  *   5. WiFi UDP 实时发送融合结果
+ *
+ * 优化:
+ *   A. 中断驱动读取 (INT1 → GPIO 中断 → 信号量唤醒任务)
+ *   B. IRAM 优化 (sdkconfig.defaults)
+ *   C. 全局时间戳同步 (主机广播 offset, 节点校正)
  */
 
 #include <stdio.h>
@@ -37,6 +42,7 @@
 #include "icm42688_alg.h"
 #include "icm42688_dual.h"
 #include "net_send.h"
+#include "time_sync.h"
 
 static const char *TAG = "main";
 
@@ -47,6 +53,7 @@ static const char *TAG = "main";
 #define PIN_MOSI_A    11
 #define PIN_MISO_A    13
 #define PIN_CS_A      10
+#define PIN_INT_A     46     /* IMU-A INT1 引脚, 用于中断驱动 */
 #define SPI_HOST_A    SPI2_HOST
 
 /* ============================================================
@@ -56,7 +63,13 @@ static const char *TAG = "main";
 #define PIN_MOSI_B    35
 #define PIN_MISO_B    37
 #define PIN_CS_B      34
+#define PIN_INT_B     9      /* IMU-B INT1 引脚, 用于中断驱动 */
 #define SPI_HOST_B    SPI3_HOST
+
+/* ============================================================
+ *  节点 ID (用于时间同步, 每个节点唯一)
+ * ============================================================ */
+#define NODE_ID       0x01
 
 /* ============================================================
  *  传感器参数
@@ -92,6 +105,7 @@ void app_main(void)
         .pin_mosi       = PIN_MOSI_A,
         .pin_miso       = PIN_MISO_A,
         .pin_cs         = PIN_CS_A,
+        .pin_int        = PIN_INT_A,  /* 中断引脚 */
         .clock_speed_hz = 10000000,
     };
 
@@ -102,6 +116,7 @@ void app_main(void)
         .pin_mosi       = PIN_MOSI_B,
         .pin_miso       = PIN_MISO_B,
         .pin_cs         = PIN_CS_B,
+        .pin_int        = PIN_INT_B,  /* 中断引脚 */
         .clock_speed_hz = 10000000,
     };
 
@@ -130,6 +145,17 @@ void app_main(void)
     if (err != ICM42688_OK) {
         ESP_LOGE(TAG, "IMU-B init failed: %d", err);
         return;
+    }
+
+    /* ---- 5.1 配置中断驱动 (Data Ready → GPIO 中断 → 信号量) ---- */
+    ESP_LOGI(TAG, "配置中断驱动读取...");
+    err = icm42688_init_interrupt(&imu_a, PIN_INT_A);
+    if (err != ICM42688_OK) {
+        ESP_LOGW(TAG, "IMU-A 中断配置失败, 降级为轮询模式");
+    }
+    err = icm42688_init_interrupt(&imu_b, PIN_INT_B);
+    if (err != ICM42688_OK) {
+        ESP_LOGW(TAG, "IMU-B 中断配置失败, 降级为轮询模式");
     }
 
     /* ---- 6. 双 IMU 交叉校准 ---- */
@@ -161,7 +187,7 @@ void app_main(void)
         ESP_LOGW(TAG, "Cross calibration failed, continuing");
     }
 
-    /* ---- 7. 初始化 ESP-NOW 广播 ---- */
+    /* ---- 7. 初始化 ESP-NOW 广播 + 时间同步 ---- */
     ESP_LOGI(TAG, "初始化 ESP-NOW 广播 (无需路由器)");
     if (!net_wifi_init(NULL)) {
         ESP_LOGE(TAG, "ESP-NOW WiFi init 失败, 仅串口输出");
@@ -169,7 +195,9 @@ void app_main(void)
     if (!net_udp_init(NULL)) {
         ESP_LOGE(TAG, "ESP-NOW init 失败, 仅串口输出");
     }
-    ESP_LOGI(TAG, "ESP-NOW 广播就绪, 所有同信道 ESP32 均可接收");
+    net_set_node_id(NODE_ID);
+    net_time_sync_init();
+    ESP_LOGI(TAG, "ESP-NOW + 时间同步就绪 (node_id=0x%02X)", NODE_ID);
 
     /* ---- 8. 主循环 ---- */
     dual_imu_result_t result;
@@ -177,13 +205,23 @@ void app_main(void)
     const int64_t output_interval_us = 1000000 / OUTPUT_HZ;
     uint32_t pkt_count = 0;
 
-    ESP_LOGI(TAG, "=== 开始双路融合解算 (%dHz) ===", OUTPUT_HZ);
+    ESP_LOGI(TAG, "=== 开始双路融合解算 (%dHz, 中断驱动) ===", OUTPUT_HZ);
 
     while (1) {
+        /* ---- 优化A: 中断驱动等待 Data Ready ----
+         * 优先等待 IMU-A 的 INT1 中断 (高优先级任务阻塞)
+         * 超时 2ms 保护: 防止中断丢失时任务卡死
+         */
+        icm42688_err_t drdy_err = icm42688_wait_drdy(&imu_a, 2);
+        if (drdy_err == ICM42688_ERR_TIMEOUT) {
+            /* 中断超时, 可能 INT 引脚未连接, 降级为短暂延时 */
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
+
         /* 双路同步读取 + 融合 */
         err = dual_imu_update(&dual_dev, &result);
         if (err != ICM42688_OK) {
-            vTaskDelay(pdMS_TO_TICKS(5));
+            vTaskDelay(pdMS_TO_TICKS(1));
             continue;
         }
 
@@ -192,14 +230,14 @@ void app_main(void)
         if ((now - last_output) >= output_interval_us) {
             last_output = now;
 
-            /* 构建 ESP-NOW 发送数据包 */
+            /* 构建 ESP-NOW 发送数据包 (使用全局同步时间戳) */
             net_imu_packet_t pkt = {
                 .accel = {result.accel.x, result.accel.y, result.accel.z},
                 .gyro  = {result.gyro.x,  result.gyro.y,  result.gyro.z},
                 .temp  = result.temperature,
                 .quat  = {result.quat.w, result.quat.x, result.quat.y, result.quat.z},
                 .euler = {result.euler.roll, result.euler.pitch, result.euler.yaw},
-                .timestamp_us = result.timestamp_us,
+                .timestamp_us = (uint64_t)net_get_synced_time(),  /* 全局同步时间 */
             };
 
             /* ESP-NOW 广播发送 */
@@ -217,14 +255,17 @@ void app_main(void)
                          result.accel_diff, result.gyro_diff,
                          send_ok ? "TX✓" : "TX✗");
 
-                /* 显示两路 IMU 在线状态 */
+                /* 显示两路 IMU 在线状态 + 中断计数 */
                 const char *sta = dual_dev.imu[0].online ? "ON" : "OFF";
                 const char *stb = dual_dev.imu[1].online ? "ON" : "OFF";
-                ESP_LOGI(TAG, "  IMU-A: %s | IMU-B: %s | Cross: %s",
-                         sta, stb, result.cross_check_ok ? "OK" : "MISMATCH");
+                ESP_LOGI(TAG, "  IMU-A: %s (IRQ:%lu) | IMU-B: %s (IRQ:%lu) | Sync:%s #%lu",
+                         sta, (unsigned long)icm42688_get_int_count(&imu_a),
+                         stb, (unsigned long)icm42688_get_int_count(&imu_b),
+                         net_time_sync_valid() ? "OK" : "WAIT",
+                         (unsigned long)net_time_sync_count());
             }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(1));
+        /* 不再需要 vTaskDelay — 中断驱动, CPU 在等待信号量时自动让出 */
     }
 }

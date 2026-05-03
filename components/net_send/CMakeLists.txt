@@ -1,10 +1,12 @@
 idf_component_register(
     SRCS
         "src/net_send.c"
+        "src/time_sync.c"
     INCLUDE_DIRS
         "include"
     REQUIRES
         esp_wifi
         freertos
         log
+        esp_timer
 )

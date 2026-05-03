@@ -9,6 +9,7 @@
  */
 
 #include "net_send.h"
+#include "time_sync.h"
 #include "esp_log.h"
 #include "esp_wifi.h"
 #include "esp_now.h"
@@ -24,6 +25,8 @@ static const char *TAG = "net_send";
 static bool s_espnow_init_done = false;
 static uint32_t s_send_ok_count = 0;
 static uint32_t s_send_fail_count = 0;
+static time_sync_state_t s_time_sync = {0};
+static uint8_t s_node_id = 0;  /* 本节点 ID, 可通过 net_set_node_id 设置 */
 
 /* 广播目标 MAC 地址 (FF:FF:FF:FF:FF:FF = 所有设备) */
 static const uint8_t s_broadcast_mac[ESP_NOW_ETH_ALEN] = {
@@ -51,7 +54,24 @@ static void espnow_send_cb(const esp_now_send_info_t *info, esp_now_send_status_
 static void espnow_recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int len)
 {
     if (!info || !data || len <= 0) return;
-    /* 可在此处理来自其他 ESP32 的数据 */
+
+    /* 检查是否是时间同步包 */
+    if (len >= (int)sizeof(timesync_packet_t)) {
+        const timesync_packet_t *ts_pkt = (const timesync_packet_t *)data;
+        if (ts_pkt->type >= TIMESYNC_START && ts_pkt->type <= TIMESYNC_HEARTBEAT) {
+            bool handled = time_sync_handle_rx(&s_time_sync, data, len);
+            if (handled && ts_pkt->type == TIMESYNC_START) {
+                /* 需要回复 SYNC_REPLY — 在回调中用 esp_now_send 发送 */
+                uint8_t reply_buf[sizeof(timesync_packet_t)];
+                int reply_len = 0;
+                time_sync_gen_reply(reply_buf, &reply_len, ts_pkt, s_node_id);
+                esp_now_send(info->src_addr, reply_buf, reply_len);
+            }
+            return;  /* 同步包处理完毕, 不传给上层 */
+        }
+    }
+
+    /* 非同步包: 此处可扩展处理其他自定义数据 */
 }
 
 /* ============================================================
@@ -223,4 +243,33 @@ uint32_t net_espnow_get_send_ok(void)
 uint32_t net_espnow_get_send_fail(void)
 {
     return s_send_fail_count;
+}
+
+/* ============================================================
+ *  API — 时间同步
+ * ============================================================ */
+
+void net_time_sync_init(void)
+{
+    time_sync_init(&s_time_sync);
+}
+
+void net_set_node_id(uint8_t id)
+{
+    s_node_id = id;
+}
+
+int64_t net_get_synced_time(void)
+{
+    return time_sync_get_time(&s_time_sync);
+}
+
+bool net_time_sync_valid(void)
+{
+    return time_sync_is_valid(&s_time_sync);
+}
+
+uint32_t net_time_sync_count(void)
+{
+    return s_time_sync.sync_count;
 }

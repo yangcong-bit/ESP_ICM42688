@@ -12,6 +12,9 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "driver/spi_master.h"
+#include "driver/gpio.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "icm42688_reg.h"
 
 #ifdef __cplusplus
@@ -27,6 +30,7 @@ typedef struct {
     int         pin_mosi;
     int         pin_miso;
     int         pin_cs;
+    int         pin_int;        /* INT1 中断引脚, -1 = 不使用中断 */
     int         clock_speed_hz;/* SPI 时钟, 建议 ≤10MHz */
 } icm42688_spi_cfg_t;
 
@@ -79,6 +83,9 @@ typedef struct {
     icm42688_cfg_t       cfg;
     icm42688_axis3f_t    accel_bias;  /* 加速度偏移校准 (g) */
     icm42688_axis3f_t    gyro_bias;   /* 陀螺仪偏移校准 (dps) */
+    int                  int_gpio;    /* 中断引脚号, -1 = 未配置 */
+    SemaphoreHandle_t    int_sem;     /* Data Ready 二值信号量 */
+    volatile uint32_t    int_count;   /* 中断触发计数 (诊断用) */
     bool                 initialized;
 } icm42688_dev_t;
 
@@ -134,6 +141,36 @@ void icm42688_deinit(icm42688_dev_t *dev);
  */
 icm42688_err_t icm42688_read_polling(icm42688_dev_t *dev,
                                      icm42688_reading_t *reading);
+
+/* ============================================================
+ *  API — 中断驱动读取
+ * ============================================================ */
+
+/**
+ * @brief 配置 INT1 引脚为 Data Ready 中断 (GPIO 下降沿)
+ *
+ * 内部创建二值信号量, 每次 ICM42688 数据就绪时 ISR 释放信号量。
+ * 必须在 icm42688_init 之后、读取循环之前调用。
+ *
+ * @param int_pin  INT1 连接的 ESP32 GPIO 引脚号
+ */
+icm42688_err_t icm42688_init_interrupt(icm42688_dev_t *dev, int int_pin);
+
+/**
+ * @brief 等待 Data Ready 中断 (阻塞, 超时)
+ *
+ * 内部 xSemaphoreTake, 当 INT1 触发时返回。
+ * 推荐在高优先级任务中调用, 替代 vTaskDelay 轮询。
+ *
+ * @param timeout_ms  超时毫秒, portMAX_DELAY = 永久等待
+ * @return ICM42688_OK 收到中断, ICM42688_ERR_TIMEOUT 超时
+ */
+icm42688_err_t icm42688_wait_drdy(icm42688_dev_t *dev, uint32_t timeout_ms);
+
+/**
+ * @brief 获取中断触发次数 (诊断用)
+ */
+uint32_t icm42688_get_int_count(const icm42688_dev_t *dev);
 
 /* ============================================================
  *  API — 偏移校准

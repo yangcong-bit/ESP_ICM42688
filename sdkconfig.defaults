@@ -17,3 +17,35 @@ CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
 # 分区表: 使用适合 8MB Flash 的大分区表
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_8mb.csv"
+
+# ============================================================
+#  IRAM 优化 (解决 IRAM 100% 占满)
+# ============================================================
+
+# 关闭 WiFi 日志 (减少 IRAM 占用)
+CONFIG_LOG_DEFAULT_LEVEL_WARN=y
+CONFIG_LOG_DEFAULT_LEVEL=2
+
+# 关闭不必要的 WiFi 调试功能
+CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=n
+CONFIG_ESP_WIFI_SOFTAP_SUPPORT=n
+
+# 优化 FreeRTOS: 不强制将所有任务栈放入 IRAM
+CONFIG_FREERTOS_TASK_FUNCTION_WRAPPER=n
+CONFIG_FREERTOS_CHECK_STACKOVERFLOW_NONE=y
+
+# 关闭不必要的安全选项 (释放 IRAM)
+CONFIG_ESP_SECURE_BOOT=n
+CONFIG_ESP_FLASH_ENCRYPTION=n
+
+# 关闭 GDB stub (节省 IRAM)
+CONFIG_ESP_GDBSTUB_SUPPORT=n
+
+# 关闭 core dump (如不需要)
+CONFIG_ESP_COREDUMP_ENABLE=n
+
+# 优化 SPI DMA 缓冲区
+CONFIG_SPI_DMA_CHAN_AUTO=y
+
+# 关闭不需要的 ADC 调试
+CONFIG_ADC_DISABLE_DAC=y

@@ -6,9 +6,11 @@
 #include "icm42688.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/portmacro.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
+#include "driver/gpio.h"
 #include <string.h>
 #include <math.h>
 
@@ -195,6 +197,9 @@ icm42688_err_t icm42688_init(icm42688_dev_t *dev,
     }
 
     dev->initialized = true;
+    dev->int_gpio = -1;
+    dev->int_sem = NULL;
+    dev->int_count = 0;
 
     /* ---- 软复位 ---- */
     icm42688_err_t err = icm42688_reset(dev);
@@ -399,4 +404,88 @@ void icm42688_set_accel_bias(icm42688_dev_t *dev, icm42688_axis3f_t bias)
 void icm42688_set_gyro_bias(icm42688_dev_t *dev, icm42688_axis3f_t bias)
 {
     dev->gyro_bias = bias;
+}
+
+/* ============================================================
+ *  API — 中断驱动读取
+ * ============================================================ */
+
+/*
+ * 注意: ISR 必须放在 IRAM 中, 但它本身非常轻量 (仅释放信号量),
+ * 不会显著增加 IRAM 占用。
+ */
+static void IRAM_ATTR icm42688_int_isr(void *arg)
+{
+    icm42688_dev_t *dev = (icm42688_dev_t *)arg;
+    dev->int_count++;
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    xSemaphoreGiveFromISR(dev->int_sem, &xHigherPriorityTaskWoken);
+    if (xHigherPriorityTaskWoken) {
+        portYIELD_FROM_ISR();
+    }
+}
+
+icm42688_err_t icm42688_init_interrupt(icm42688_dev_t *dev, int int_pin)
+{
+    if (!dev || !dev->initialized || int_pin < 0) return ICM42688_ERR_CONFIG;
+
+    /* 创建二值信号量 */
+    dev->int_sem = xSemaphoreCreateBinary();
+    if (!dev->int_sem) {
+        ESP_LOGE(TAG, "Failed to create interrupt semaphore");
+        return ICM42688_ERR_CONFIG;
+    }
+
+    /* 配置 GPIO 为输入, 下降沿触发 */
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << int_pin),
+        .mode         = GPIO_MODE_INPUT,
+        .pull_up_en   = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_NEGEDGE,
+    };
+    esp_err_t ret = gpio_config(&io_conf);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "GPIO config failed for INT pin %d: %s", int_pin, esp_err_to_name(ret));
+        vSemaphoreDelete(dev->int_sem);
+        dev->int_sem = NULL;
+        return ICM42688_ERR_CONFIG;
+    }
+
+    /* 安装 GPIO ISR 服务 (全局只需一次, 重复调用安全) */
+    gpio_install_isr_service(0);
+
+    /* 绑定 ISR 到此 GPIO */
+    ret = gpio_isr_handler_add(int_pin, icm42688_int_isr, (void *)dev);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "ISR add failed for pin %d: %s", int_pin, esp_err_to_name(ret));
+        vSemaphoreDelete(dev->int_sem);
+        dev->int_sem = NULL;
+        return ICM42688_ERR_CONFIG;
+    }
+
+    dev->int_gpio = int_pin;
+    ESP_LOGI(TAG, "Interrupt configured on GPIO %d (falling edge, DRDY)", int_pin);
+
+    return ICM42688_OK;
+}
+
+icm42688_err_t icm42688_wait_drdy(icm42688_dev_t *dev, uint32_t timeout_ms)
+{
+    if (!dev || !dev->int_sem) return ICM42688_ERR_NOT_INIT;
+
+    TickType_t ticks = (timeout_ms == 0) ? 1 : pdMS_TO_TICKS(timeout_ms);
+    if (timeout_ms == UINT32_MAX) {
+        ticks = portMAX_DELAY;
+    }
+
+    if (xSemaphoreTake(dev->int_sem, ticks) == pdTRUE) {
+        return ICM42688_OK;
+    }
+    return ICM42688_ERR_TIMEOUT;
+}
+
+uint32_t icm42688_get_int_count(const icm42688_dev_t *dev)
+{
+    return dev ? dev->int_count : 0;
 }

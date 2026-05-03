@@ -149,6 +149,37 @@ uint32_t net_espnow_get_send_ok(void);
  */
 uint32_t net_espnow_get_send_fail(void);
 
+/* ============================================================
+ *  API — 全局时间同步
+ * ============================================================ */
+
+/**
+ * @brief 初始化时间同步模块
+ */
+void net_time_sync_init(void);
+
+/**
+ * @brief 设置本节点 ID (用于时间同步回复)
+ */
+void net_set_node_id(uint8_t id);
+
+/**
+ * @brief 获取全局同步时间 (μs)
+ *
+ * 已同步时返回 host_time + offset, 否则返回本地时间
+ */
+int64_t net_get_synced_time(void);
+
+/**
+ * @brief 时间同步是否有效 (5 秒内有同步)
+ */
+bool net_time_sync_valid(void);
+
+/**
+ * @brief 获取同步次数
+ */
+uint32_t net_time_sync_count(void);
+
 #ifdef __cplusplus
 }
 #endif
