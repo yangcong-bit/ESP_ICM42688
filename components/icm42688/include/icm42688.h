@@ -1,0 +1,182 @@
+/**
+ * @file icm42688.h
+ * @brief ICM-42688-P SPI 驱动 — 公共 API
+ *
+ * 适用于 ESP32-S3 + ESP-IDF 5.x
+ * 使用 hardware SPI master, 支持 DMA
+ */
+
+#ifndef ICM42688_H
+#define ICM42688_H
+
+#include <stdint.h>
+#include <stdbool.h>
+#include "driver/spi_master.h"
+#include "icm42688_reg.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ============================================================
+ *  SPI 引脚 & 设备配置
+ * ============================================================ */
+typedef struct {
+    int         spi_host;       /* SPI2_HOST / SPI3_HOST */
+    int         pin_sclk;
+    int         pin_mosi;
+    int         pin_miso;
+    int         pin_cs;
+    int         clock_speed_hz;/* SPI 时钟, 建议 ≤10MHz */
+} icm42688_spi_cfg_t;
+
+/* ============================================================
+ *  传感器配置
+ * ============================================================ */
+typedef struct {
+    icm42688_accel_fs_t  accel_fs;    /* 加速度计量程 */
+    icm42688_gyro_fs_t   gyro_fs;     /* 陀螺仪量程 */
+    icm42688_odr_t       accel_odr;   /* 加速度计 ODR */
+    icm42688_odr_t       gyro_odr;    /* 陀螺仪 ODR */
+    bool                 enable_fifo; /* 是否启用 FIFO */
+} icm42688_cfg_t;
+
+/* ============================================================
+ *  三轴原始数据 (int16)
+ * ============================================================ */
+typedef struct {
+    int16_t x;
+    int16_t y;
+    int16_t z;
+} icm42688_axis3i16_t;
+
+/* ============================================================
+ *  三轴浮点数据 (物理单位)
+ * ============================================================ */
+typedef struct {
+    float x;  /* g  或 dps */
+    float y;
+    float z;
+} icm42688_axis3f_t;
+
+/* ============================================================
+ *  传感器读数 (完整包)
+ * ============================================================ */
+typedef struct {
+    icm42688_axis3i16_t  accel_raw;   /* 原始加速度 (LSB) */
+    icm42688_axis3i16_t  gyro_raw;    /* 原始陀螺仪 (LSB) */
+    float                temp_raw;    /* 原始温度 (°C) */
+    icm42688_axis3f_t    accel_g;     /* 加速度 (g) */
+    icm42688_axis3f_t    gyro_dps;    /* 陀螺仪 (dps) */
+    uint64_t             timestamp_us;/* 获取时间 (μs) */
+} icm42688_reading_t;
+
+/* ============================================================
+ *  设备句柄
+ * ============================================================ */
+typedef struct {
+    spi_device_handle_t  spi_dev;
+    icm42688_cfg_t       cfg;
+    icm42688_axis3f_t    accel_bias;  /* 加速度偏移校准 (g) */
+    icm42688_axis3f_t    gyro_bias;   /* 陀螺仪偏移校准 (dps) */
+    bool                 initialized;
+} icm42688_dev_t;
+
+/* ============================================================
+ *  返回码
+ * ============================================================ */
+typedef enum {
+    ICM42688_OK = 0,
+    ICM42688_ERR_SPI_INIT,
+    ICM42688_ERR_WHO_AM_I,
+    ICM42688_ERR_RESET,
+    ICM42688_ERR_CONFIG,
+    ICM42688_ERR_TIMEOUT,
+    ICM42688_ERR_NOT_INIT,
+} icm42688_err_t;
+
+/* ============================================================
+ *  API — 初始化 & 配置
+ * ============================================================ */
+
+/**
+ * @brief 初始化 ICM42688 设备
+ * @param dev       设备句柄 (调用者分配)
+ * @param spi_cfg   SPI 引脚 & 时钟配置
+ * @param sensor_cfg 传感器量程 / ODR 配置, NULL = 默认值
+ * @return ICM42688_OK 成功
+ */
+icm42688_err_t icm42688_init(icm42688_dev_t *dev,
+                             const icm42688_spi_cfg_t *spi_cfg,
+                             const icm42688_cfg_t *sensor_cfg);
+
+/**
+ * @brief 软复位并重新初始化
+ */
+icm42688_err_t icm42688_reset(icm42688_dev_t *dev);
+
+/**
+ * @brief 关闭设备 (进入最低功耗)
+ */
+void icm42688_deinit(icm42688_dev_t *dev);
+
+/* ============================================================
+ *  API — 数据读取 (polling)
+ * ============================================================ */
+
+/**
+ * @brief 读取一次完整的传感器数据 (温度+加速度+陀螺仪)
+ *
+ * 内部按寄存器顺序一次性 burst read 14 bytes:
+ *   TEMP_DATA1..0, ACCEL_XYZ(6), GYRO_XYZ(6)
+ *
+ * @param[out] reading  输出读数
+ */
+icm42688_err_t icm42688_read_polling(icm42688_dev_t *dev,
+                                     icm42688_reading_t *reading);
+
+/* ============================================================
+ *  API — 偏移校准
+ * ============================================================ */
+
+/**
+ * @brief 静态六面校准
+ *
+ * 在传感器静止时调用，采集若干样本计算零偏偏移
+ * @param samples 采样次数 (建议 ≥200)
+ */
+icm42688_err_t icm42688_calibrate_bias(icm42688_dev_t *dev, uint32_t samples);
+
+/**
+ * @brief 获取已存储的偏移
+ */
+icm42688_axis3f_t icm42688_get_accel_bias(const icm42688_dev_t *dev);
+icm42688_axis3f_t icm42688_get_gyro_bias(const icm42688_dev_t *dev);
+
+/**
+ * @brief 手动设置偏移
+ */
+void icm42688_set_accel_bias(icm42688_dev_t *dev, icm42688_axis3f_t bias);
+void icm42688_set_gyro_bias(icm42688_dev_t *dev, icm42688_axis3f_t bias);
+
+/* ============================================================
+ *  API — 寄存器读写 (高级)
+ * ============================================================ */
+icm42688_err_t icm42688_read_reg(icm42688_dev_t *dev,
+                                  uint8_t reg, uint8_t *val);
+icm42688_err_t icm42688_write_reg(icm42688_dev_t *dev,
+                                   uint8_t reg, uint8_t val);
+icm42688_err_t icm42688_read_regs(icm42688_dev_t *dev,
+                                   uint8_t reg, uint8_t *buf, size_t len);
+
+/* ============================================================
+ *  辅助 — 量程换算
+ * ============================================================ */
+float icm42688_accel_fs_to_sensitivity(icm42688_accel_fs_t fs);
+float icm42688_gyro_fs_to_sensitivity(icm42688_gyro_fs_t fs);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* ICM42688_H */

@@ -1,0 +1,10 @@
+idf_component_register(
+    SRCS
+        "src/net_send.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        esp_wifi
+        freertos
+        log
+)

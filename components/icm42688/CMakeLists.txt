@@ -1,0 +1,12 @@
+idf_component_register(
+    SRCS
+        "src/icm42688.c"
+        "src/icm42688_alg.c"
+        "src/icm42688_dual.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        driver
+        esp_timer
+        heap
+)
