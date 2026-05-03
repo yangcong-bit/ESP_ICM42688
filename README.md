@@ -8,12 +8,11 @@
 |------|------|
 | **ICM42688 SPI 驱动** | 初始化、burst read 14B、量程配置、偏移校准 |
 | **中断驱动读取** | INT1 → GPIO 中断 → 二值信号量 → 高优先级任务唤醒，CPU 零空转 |
-| **Mahony AHRS 解算** | 四元数互补滤波器、欧拉角输出、在线陀螺仪偏置估计 |
+| **6-ESKF 姿态解算** | 6状态误差卡尔曼滤波，序贯更新零矩阵求逆，医疗级精度 |
 | **双路融合** | 交叉校准、安装误差自动补偿、异常检测、单路降级运行 |
 | **ESP-NOW 广播** | 无需路由器、低延迟 (~2ms)、30~200m 通信距离 |
 | **全局时钟同步** | 主机广播 offset 校正，多节点微秒级时间对齐 |
 | **IRAM 优化** | 关闭无用调试选项，释放 IRAM 给 ESP-NOW/WiFi 协议栈 |
-| **信号滤波** | 滑动平均、一阶 IIR 低通、加权融合 |
 
 ## 📁 项目结构
 
@@ -29,12 +28,14 @@ ESP_ICM42688/
 │   │   ├── include/
 │   │   │   ├── icm42688.h            # SPI 驱动 + 中断 API
 │   │   │   ├── icm42688_reg.h        # 寄存器定义 & 量程枚举
-│   │   │   ├── icm42688_alg.h        # Mahony AHRS + 滤波器 API
-│   │   │   └── icm42688_dual.h       # 双 IMU 融合 + 3x3 矩阵运算
+│   │   │   ├── icm42688_alg.h        # 四元数/欧拉角工具 + 滤波器
+│   │   │   ├── icm42688_dual.h       # 双 IMU 融合 + 3x3 矩阵运算
+│   │   │   └── hardcore_eskf.h       # 6状态 ESKF 滤波器
 │   │   └── src/
-│   │       ├── icm42688.c            # SPI 驱动 + 中断 ISR 实现
-│   │       ├── icm42688_alg.c        # AHRS 解算实现
-│   │       └── icm42688_dual.c       # 双路融合实现
+│   │       ├── icm42688.c            # SPI 驱动 + 中断 ISR
+│   │       ├── icm42688_alg.c        # 四元数/欧拉角工具
+│   │       ├── icm42688_dual.c       # 双路融合 (调用 ESKF)
+│   │       └── hardcore_eskf.c       # ESKF 核心 (IRAM_ATTR)
 │   └── net_send/                     # 网络发送 + 时间同步组件
 │       ├── include/
 │       │   ├── net_send.h            # ESP-NOW 广播 API
@@ -44,9 +45,9 @@ ESP_ICM42688/
 │           └── time_sync.c           # 三步时钟同步实现
 ├── main/
 │   ├── CMakeLists.txt
-│   └── main.c                        # 主程序: 中断驱动 + 双 IMU + ESP-NOW + 时间同步
+│   └── main.c                        # 主程序: 中断驱动 + 双 IMU + ESP-NOW
 ├── examples/
-│   └── espnow_receiver/              # ESP-NOW 接收端示例 (烧录到另一块 ESP32)
+│   └── espnow_receiver/              # ESP-NOW 接收端示例
 │       ├── CMakeLists.txt
 │       └── main/main.c
 └── tools/
@@ -111,8 +112,6 @@ idf.py -p COMx flash monitor
 
 ### 4. 接收数据
 
-#### 方式一：ESP-NOW 接收（推荐）
-
 将 `examples/espnow_receiver/` 烧录到另一块 ESP32：
 
 ```bash
@@ -132,7 +131,7 @@ idf.py build flash monitor
                     │  ┌─────────────────────────────┐    │
   ICM42688-B ─SPI──→│  │  高优先级读取任务            │    │──→ ESP-NOW 广播
   INT1(9) ─────────→│  │  wait_drdy → burst read     │    │    (64B 二进制包)
-                    │  │  → 双路融合 → AHRS 解算     │    │
+                    │  │  → 双路融合 → 6-ESKF 解算   │    │
                     │  └─────────────────────────────┘    │
                     │  时间同步: 收到 SYNC_START 自动回复  │
                     └─────────────────────────────────────┘
@@ -160,10 +159,29 @@ idf.py build flash monitor
 
 ```
 IMU-A ─→ 读取 ─→ [坐标变换] ──┐
-                                ├──→ 加权融合 ──→ Mahony AHRS ──→ 四元数/欧拉角
-IMU-B ─→ 读取 ─→ [安装补偿] ──┘        ↑
-                                交叉校验 & 异常检测
+                                ├──→ 加权融合 ──→ 6-ESKF 解算 ──→ 四元数/欧拉角
+IMU-B ─→ 读取 ─→ [安装补偿] ──┘        ↑            ↓
+                                交叉校验     eskf_predict (预测步)
+                                & 异常检测   eskf_update_accel (更新步)
 ```
+
+### 6状态 ESKF 算法
+
+采用 **Error-State Kalman Filter**（误差状态卡尔曼滤波器），相比传统 Mahony 互补滤波器具有更高精度和更强的噪声抑制能力：
+
+| 特性 | 说明 |
+|------|------|
+| **状态维度** | 6维：角度误差(3) + 陀螺仪零偏(3) |
+| **预测步** | 陀螺仪积分更新名义四元数，协方差矩阵 F 传播 |
+| **更新步** | 加速度计序贯更新，3次标量运算替代矩阵求逆 |
+| **零偏估计** | 实时估计并补偿陀螺仪零偏漂移 |
+| **IRAM 优化** | 核心运算函数标记 `IRAM_ATTR`，确保中断级实时性 |
+| **零动态内存** | 全部 6×6 矩阵运算在栈上完成，无 malloc |
+
+**调参指南**：
+- `noise_gyro` (默认 0.001)：陀螺仪白噪声方差，增大则更信任加速度计
+- `noise_bias` (默认 0.0001)：零偏随机游走方差，增大则零偏收敛更快
+- `noise_accel` (默认 0.05)：加速度计噪声方差，增大则加速度修正更保守
 
 ### 全局时钟同步协议
 
