@@ -153,10 +153,9 @@ icm42688_err_t dual_imu_init(dual_imu_dev_t *dev,
         dev->R_align = mat3_identity();
     }
 
-    /* 初始化各自的 Mahony 滤波器 */
-    mahony_init(&dev->ahrs[0], def_cfg.kp, def_cfg.ki, def_cfg.sample_hz);
-    mahony_init(&dev->ahrs[1], def_cfg.kp, def_cfg.ki, def_cfg.sample_hz);
-    mahony_init(&dev->ahrs_fused, def_cfg.kp, def_cfg.ki, def_cfg.sample_hz);
+    /* 初始化 6-状态误差卡尔曼滤波器 (ESKF) */
+    eskf_init(&dev->eskf_fused, &dev->eskf_state_fused);
+    dev->last_update_us = esp_timer_get_time();
 
     dev->initialized = true;
 
@@ -303,24 +302,38 @@ icm42688_err_t dual_imu_update(dual_imu_dev_t *dev,
         result->confidence = 0.0f;
     }
 
-    /* ---- 7. 分别更新 AHRS ---- */
-    if (dev->imu[0].online) {
-        mahony_update(&dev->ahrs[0], &accel_a, &gyro_a);
-    }
-    if (dev->imu[1].online) {
-        mahony_update(&dev->ahrs[1], &accel_b, &gyro_b);
+    /* ---- 7. ESKF 融合解算 (替代旧的 Mahony) ---- */
+    {
+        /* 计算真实的积分步长 (秒) */
+        uint64_t now_us = esp_timer_get_time();
+        float dt = (now_us - dev->last_update_us) / 1000000.0f;
+        if (dt <= 0.0f || dt > 0.1f) dt = 0.001f;  /* 防护: 默认 1ms */
+        dev->last_update_us = now_us;
+
+        /* 准备数据传递给 ESKF (转为 float 数组, 陀螺仪需转为 rad/s) */
+        float gyro_rads[3] = {
+            gyro_fused.x * (float)(M_PI / 180.0f),
+            gyro_fused.y * (float)(M_PI / 180.0f),
+            gyro_fused.z * (float)(M_PI / 180.0f)
+        };
+        float accel_g[3] = { accel_fused.x, accel_fused.y, accel_fused.z };
+
+        /* 1. 预测步 (高频执行, 在 IRAM 中运行) */
+        eskf_predict(&dev->eskf_fused, &dev->eskf_state_fused, gyro_rads, dt);
+
+        /* 2. 更新步 (利用加速度校正, 在 IRAM 中运行) */
+        eskf_update_accel(&dev->eskf_fused, &dev->eskf_state_fused, accel_g);
     }
 
-    /* ---- 8. 融合 AHRS ---- */
-    /*
-     * 策略: 对融合后的加速度和陀螺仪数据运行独立的 Mahony 滤波器
-     * 这样即使某路 IMU 短暂丢失, 滤波器状态仍平滑
-     */
-    mahony_update(&dev->ahrs_fused, &accel_fused, &gyro_fused);
+    /* ---- 8. 输出 ---- */
+    /* 从 ESKF 标称状态提取四元数 */
+    result->quat.w = dev->eskf_state_fused.q[0];
+    result->quat.x = dev->eskf_state_fused.q[1];
+    result->quat.y = dev->eskf_state_fused.q[2];
+    result->quat.z = dev->eskf_state_fused.q[3];
 
-    /* ---- 9. 输出 ---- */
-    result->quat  = mahony_get_quat(&dev->ahrs_fused);
-    result->euler = mahony_get_euler(&dev->ahrs_fused);
+    /* 四元数 → 欧拉角 */
+    result->euler = quat_to_euler(result->quat);
     result->accel = accel_fused;
     result->gyro  = gyro_fused;
     result->temperature = (dev->imu[0].online) ?
@@ -486,11 +499,11 @@ const dual_imu_unit_t *dual_imu_get_unit(const dual_imu_dev_t *dev, int idx)
 void dual_imu_reset(dual_imu_dev_t *dev)
 {
     if (!dev) return;
-    mahony_reset(&dev->ahrs[0]);
-    mahony_reset(&dev->ahrs[1]);
-    mahony_reset(&dev->ahrs_fused);
+    /* 重新初始化 ESKF */
+    eskf_init(&dev->eskf_fused, &dev->eskf_state_fused);
+    dev->last_update_us = esp_timer_get_time();
     dev->fused_count = 0;
     dev->imu[0].gyro_bias_run = (icm42688_axis3f_t){0};
     dev->imu[1].gyro_bias_run = (icm42688_axis3f_t){0};
-    ESP_LOGI(TAG, "Dual IMU reset");
+    ESP_LOGI(TAG, "Dual IMU reset (ESKF reinitialized)");
 }

@@ -3,6 +3,7 @@ idf_component_register(
         "src/icm42688.c"
         "src/icm42688_alg.c"
         "src/icm42688_dual.c"
+        "src/hardcore_eskf.c"
     INCLUDE_DIRS
         "include"
     REQUIRES
