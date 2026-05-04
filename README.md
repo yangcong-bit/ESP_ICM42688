@@ -124,26 +124,25 @@ idf.py build flash monitor
 
 ### 系统架构
 
-```
-                    ┌─────────────────────────────────────┐
-                    │           ESP32-S3 主节点            │
-  ICM42688-A ─SPI──→│  INT1(46) ─→ GPIO ISR ─→ 信号量     │
-                    │  ┌─────────────────────────────┐    │
-  ICM42688-B ─SPI──→│  │  高优先级读取任务            │    │──→ ESP-NOW 广播
-  INT1(9) ─────────→│  │  wait_drdy → burst read     │    │    (64B 二进制包)
-                    │  │  → 双路融合 → 6-ESKF 解算   │    │
-                    │  └─────────────────────────────┘    │
-                    │  时间同步: 收到 SYNC_START 自动回复  │
-                    └─────────────────────────────────────┘
-                                       │
-                         ESP-NOW 广播 (同信道所有设备)
-                                       │
-                    ┌──────────────────┼──────────────────┐
-                    │                  │                   │
-               ┌────▼────┐       ┌─────▼────┐       ┌─────▼────┐
-               │ 接收端1  │       │ 接收端2   │       │ 接收端N  │
-               │ ESP32   │       │ RK3566   │       │ PC      │
-               └─────────┘       └──────────┘       └─────────┘
+```mermaid
+flowchart TB
+    subgraph ESP32S3["ESP32-S3 主节点"]
+        direction TB
+        ISR_A["GPIO ISR<br/>INT1(46)"] --> SEM["二值信号量"]
+        ISR_B["GPIO ISR<br/>INT1(9)"] --> SEM
+        SEM --> TASK["高优先级读取任务<br/>wait_drdy → burst read<br/>→ 双路融合 → 6-ESKF 解算"]
+        SYNC["时间同步<br/>收到 SYNC_START 自动回复"]
+    end
+
+    IMU_A["ICM42688-A<br/>SPI2"] -->|SPI| ISR_A
+    IMU_B["ICM42688-B<br/>SPI3"] -->|SPI| ISR_B
+
+    TASK -->|"ESP-NOW 广播<br/>64B 二进制包"| BROADCAST{{"ESP-NOW 广播<br/>同信道所有设备"}}
+
+    BROADCAST --> R1["接收端1<br/>ESP32"]
+    BROADCAST --> R2["接收端2<br/>RK3566"]
+    BROADCAST --> RN["接收端N<br/>PC"]
+    SYNC -.->|"时间同步包"| BROADCAST
 ```
 
 ### 中断驱动 vs 轮询
@@ -157,12 +156,19 @@ idf.py build flash monitor
 
 ### 双路融合流程
 
-```
-IMU-A ─→ 读取 ─→ [坐标变换] ──┐
-                                ├──→ 加权融合 ──→ 6-ESKF 解算 ──→ 四元数/欧拉角
-IMU-B ─→ 读取 ─→ [安装补偿] ──┘        ↑            ↓
-                                交叉校验     eskf_predict (预测步)
-                                & 异常检测   eskf_update_accel (更新步)
+```mermaid
+flowchart LR
+    A["IMU-A<br/>读取"] --> TA["坐标变换"]
+    B["IMU-B<br/>读取"] --> AL["安装补偿"]
+
+    TA --> FUSE{{"加权融合"}}
+    AL --> FUSE
+
+    CC["交叉校验<br/>& 异常检测"] -.-> FUSE
+
+    FUSE --> PRED["eskf_predict<br/>预测步<br/>(陀螺仪积分)"]
+    PRED --> UPD["eskf_update_accel<br/>更新步<br/>(加速度校正)"]
+    UPD --> OUT["四元数 / 欧拉角"]
 ```
 
 ### 6状态 ESKF 算法
@@ -185,19 +191,20 @@ IMU-B ─→ 读取 ─→ [安装补偿] ──┘        ↑            ↓
 
 ### 全局时钟同步协议
 
-```
-主机 (RK3566)              节点 (ESP32)
-    │                          │
-    │──── SYNC_START ─────────→│  T_host_send
-    │                          │
-    │←─── SYNC_REPLY ──────────│  T_node_rx
-    │                          │
-    │  计算 RTT = T_host_rx - T_host_send
-    │  offset = (T_host_send + T_host_rx) / 2 - T_node_rx
-    │                          │
-    │──── SYNC_APPLY ─────────→│  应用 offset
-    │                          │
-    │  (每秒重复, 精度 ~10-50μs) │
+```mermaid
+sequenceDiagram
+    participant H as 主机 (RK3566)
+    participant N as 节点 (ESP32)
+
+    H->>N: SYNC_START<br/>T_host_send
+    Note over N: 记录 T_node_rx
+    N->>H: SYNC_REPLY<br/>T_node_rx
+
+    Note over H: RTT = T_host_rx - T_host_send<br/>offset = (T_host_send + T_host_rx)/2 - T_node_rx
+    H->>N: SYNC_APPLY<br/>offset_us
+    Note over N: 应用 offset<br/>后续时间戳 = 本地时间 + offset
+
+    Note over H,N: 每秒重复，精度 ~10-50μs
 ```
 
 ## 📡 数据协议
