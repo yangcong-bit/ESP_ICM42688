@@ -332,13 +332,8 @@ icm42688_err_t dual_imu_update(dual_imu_dev_t *dev,
     result->quat.y = dev->eskf_state_fused.q[2];
     result->quat.z = dev->eskf_state_fused.q[3];
 
-    /* 四元数 → 欧拉角 */
-    result->euler = quat_to_euler(result->quat);
     result->accel = accel_fused;
     result->gyro  = gyro_fused;
-    result->temperature = (dev->imu[0].online) ?
-                          dev->imu[0].reading.temp_raw :
-                          dev->imu[1].reading.temp_raw;
     result->timestamp_us = esp_timer_get_time();
 
     dev->fused_count++;

@@ -138,26 +138,24 @@ void net_deinit(void);
 /* ============================================================
  *  聚合数据包 (10帧合1包, 降低物理帧头开销)
  * ============================================================ */
-#define NET_AGGREGATE_FRAMES  10
+#define NET_AGGREGATE_FRAMES  5
 
-/* 单帧紧凑数据 */
+/* 单帧极速数据 (48B, 无欧拉角/温度冗余) */
 typedef struct __attribute__((packed)) {
-    float    accel[3];        /* 加速度 (g) */
-    float    gyro[3];         /* 陀螺仪 (dps) */
-    float    quat[4];         /* 四元数 [w, x, y, z] */
-    float    euler[3];        /* 欧拉角 [roll, pitch, yaw] */
-    float    temp;            /* 温度 (°C) */
-    uint64_t timestamp_us;    /* 全局同步时间戳 (μs) */
-} net_frame_t;  /* 52 bytes */
+    float    accel[3];        /* 加速度 (g)         12B */
+    float    gyro[3];         /* 陀螺仪 (dps)        12B */
+    float    quat[4];         /* 四元数 [w,x,y,z]    16B */
+    uint64_t timestamp_us;    /* 全局同步时间戳 (μs)  8B */
+} net_frame_t;  /* 48 bytes */
 
-/* 聚合包: header + N帧 */
+/* 聚合包: 8B header + 5×48B = 248B (严格 < 250B ESP-NOW 上限) */
 typedef struct __attribute__((packed)) {
     uint8_t  magic[4];        /* {'I','M','U','A'} */
     uint8_t  node_id;         /* 节点 ID */
-    uint8_t  frame_count;     /* 本包包含的帧数 (1~10) */
+    uint8_t  frame_count;     /* 本包包含的帧数 (1~5) */
     uint16_t reserved;        /* 保留/对齐 */
     net_frame_t frames[NET_AGGREGATE_FRAMES];
-} net_aggregated_packet_t;
+} net_aggregated_packet_t;  /* 8 + 5*48 = 248 bytes */
 
 /* ============================================================
  *  API — ESP-NOW 统计

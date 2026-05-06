@@ -216,18 +216,18 @@ void app_main(void)
     net_time_sync_init();
     ESP_LOGI(TAG, "ESP-NOW + 时间同步就绪 (node_id=0x%02X)", NODE_ID);
 
-    /* ---- 8. 主循环 (1000Hz 采样, 10帧聚合 → 100Hz 发送) ---- */
+    /* ---- 8. 主循环 (1000Hz 采样, 5帧聚合 → 200Hz 发送) ---- */
     dual_imu_result_t result;
     uint32_t pkt_count = 0;
     uint32_t send_count = 0;
 
-    /* 聚合缓冲: 攒满 10 帧再发一次 */
+    /* 聚合缓冲: 攒满 5 帧 (5ms) 再发一次, 248B < 250B ESP-NOW 上限 */
     net_aggregated_packet_t agg_pkt = {
         .magic = {'I', 'M', 'U', 'A'},
         .node_id = NODE_ID,
     };
 
-    ESP_LOGI(TAG, "=== 开始双路融合解算 (1000Hz采样, 100Hz聚合发送) ===");
+    ESP_LOGI(TAG, "=== 极速四元数模式 (1000Hz采样, 5帧聚合→200Hz发送) ===");
 
     while (1) {
         /* ---- 中断驱动等待 Data Ready ---- */
@@ -257,10 +257,6 @@ void app_main(void)
             f->quat[1]  = result.quat.x;
             f->quat[2]  = result.quat.y;
             f->quat[3]  = result.quat.z;
-            f->euler[0] = result.euler.roll;
-            f->euler[1] = result.euler.pitch;
-            f->euler[2] = result.euler.yaw;
-            f->temp     = result.temperature;
             f->timestamp_us = (uint64_t)net_get_synced_time();
             agg_pkt.frame_count = slot + 1;
         }
@@ -271,11 +267,10 @@ void app_main(void)
             agg_pkt.frame_count = 0;  /* 重置缓冲 */
             send_count++;
 
-            if (send_count % 10 == 0) {
-                ESP_LOGI(TAG, "[%lu] R=%5.1f° P=%5.1f° Y=%6.1f° | "
-                         "Conf=%.0f%% | %s | TX:%lu",
+            if (send_count % 20 == 0) {
+                ESP_LOGI(TAG, "[%lu] QW=%.4f Conf=%.0f%% | %s | TX:%lu",
                          (unsigned long)send_count,
-                         result.euler.roll, result.euler.pitch, result.euler.yaw,
+                         result.quat.w,
                          result.confidence * 100.0f,
                          send_ok ? "TX✓" : "TX✗",
                          (unsigned long)net_espnow_get_send_ok());

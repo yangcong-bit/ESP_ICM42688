@@ -62,11 +62,9 @@ typedef struct {
  *  融合结果
  * ============================================================ */
 typedef struct {
-    quat_t          quat;           /* 融合四元数 */
-    euler_t         euler;          /* 融合欧拉角 (度) */
+    quat_t          quat;           /* 融合四元数 (极速模式, 不计算欧拉角) */
     icm42688_axis3f_t accel;        /* 融合加速度 (g) */
     icm42688_axis3f_t gyro;         /* 融合陀螺仪 (dps) */
-    float           temperature;    /* 温度 (°C) */
 
     /* 置信度 & 诊断 */
     float           confidence;     /* 融合置信度 0~1 */
