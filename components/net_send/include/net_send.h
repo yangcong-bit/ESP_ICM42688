@@ -55,13 +55,11 @@ typedef enum {
  *  IMU 数据包 (用于序列化)
  * ============================================================ */
 typedef struct {
-    float    accel[3];        /* 加速度 (g) */
-    float    gyro[3];         /* 陀螺仪 (dps) */
-    float    temp;            /* 温度 (°C) */
-    float    quat[4];         /* 四元数 [w, x, y, z] */
-    float    euler[3];        /* 欧拉角 (度) [roll, pitch, yaw] */
-    uint64_t timestamp_us;    /* 时间戳 (μs) */
-} net_imu_packet_t;
+    float    accel[3];        /* 加速度 (g)         12B */
+    float    gyro[3];         /* 陀螺仪 (dps)        12B */
+    float    quat[4];         /* 四元数 [w,x,y,z]    16B */
+    uint64_t timestamp_us;    /* 全局同步时间戳 (μs)  8B */
+} net_imu_packet_t;  /* 48 bytes, 纯四元数极速模式 */
 
 /* ============================================================
  *  API
@@ -94,13 +92,11 @@ bool net_udp_init(const net_udp_cfg_t *cfg);
 /**
  * @brief 通过 UDP 发送 IMU 数据包 (二进制, 高效)
  *
- * 数据格式 (48 bytes):
+ * 数据格式 (48 bytes, 极速四元数模式):
  *   [0-11]   accel float[3]
  *   [12-23]  gyro  float[3]
- *   [24-27]  temp  float
- *   [28-43]  quat  float[4]
- *   [44-55]  euler float[3]
- *   [56-63]  timestamp uint64
+ *   [24-39]  quat  float[4]
+ *   [40-47]  timestamp uint64
  */
 bool net_udp_send_imu(const net_imu_packet_t *pkt);
 

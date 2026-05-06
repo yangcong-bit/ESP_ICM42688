@@ -21,13 +21,11 @@
 
 static const char *TAG = "espnow_rx";
 
-/* 与发送端一致的数据包结构 */
+/* 与发送端一致的数据包结构 (极速四元数模式, 48B) */
 typedef struct {
     float    accel[3];
     float    gyro[3];
-    float    temp;
     float    quat[4];
-    float    euler[3];
     uint64_t timestamp_us;
 } imu_packet_t;
 
@@ -53,15 +51,14 @@ static void espnow_recv_cb(const esp_now_recv_info_t *info,
     if (s_pkt_count % 50 == 0 || (now - s_last_time) > 500000) {
         s_last_time = now;
 
-        ESP_LOGI(TAG, "[%lu] R=%6.1f° P=%6.1f° Y=%6.1f° | "
+        ESP_LOGI(TAG, "[%lu] QW=%.4f QX=%.4f QY=%.4f QZ=%.4f | "
                  "A=[%.3f, %.3f, %.3f] g | "
-                 "G=[%.1f, %.1f, %.1f] dps | "
-                 "T=%.1f°C | ts=%llu",
+                 "G=[%.1f, %.1f, %.1f] dps | ts=%llu",
                  (unsigned long)s_pkt_count,
-                 pkt.euler[0], pkt.euler[1], pkt.euler[2],
+                 pkt.quat[0], pkt.quat[1], pkt.quat[2], pkt.quat[3],
                  pkt.accel[0], pkt.accel[1], pkt.accel[2],
                  pkt.gyro[0], pkt.gyro[1], pkt.gyro[2],
-                 pkt.temp, (unsigned long long)pkt.timestamp_us);
+                 (unsigned long long)pkt.timestamp_us);
     }
 
     /* MAC 来源信息 (仅首包) */
