@@ -1,36 +1,52 @@
 # SomatoSync — 康复医疗全身动作追踪节点
 
-> 基于 ESP32-S3 + 双路 ICM-42688-P 的高频体态监测节点，面向 12 节点全身动作捕捉场景。
+> 面向全国大学生物联网设计竞赛，基于 ESP32-S3 + 双路 ICM-42688-P 的高频体态监测节点，专为 12 节点全身动作捕捉场景设计。
 
-## 系统概述
+## 功能特性
 
-每个 SomatoSync 节点集成两颗 ICM-42688-P 六轴 IMU，通过完全独立的双路 SPI 总线以 1000Hz 频率采集原始数据，经 6-状态误差卡尔曼滤波器（ESKF）融合后，以 5 帧聚合、200Hz 的频率通过 ESP-NOW 无线广播至主站。所有时间戳经过全局时钟同步，支撑多节点骨骼动画插值。
+| 模块 | 功能 |
+|------|------|
+| **双路独立 SPI (SPI2+SPI3)** | 物理层彻底隔离，零总线冲突，极限 DMA 吞吐量 |
+| **双硬件中断严格同步** | INT1 双路阻塞同步，消除双晶振时钟漂移，保障 1000Hz 物理对齐 |
+| **LDO 强控上电时序** | IO4/IO5 独立控制 TPS7A2033，延时 50ms 稳压，杜绝错过首个中断沿 |
+| **6-ESKF 姿态解算** | 纯 C 展开 6x6 矩阵序贯更新，零矩阵求逆，零动态内存分配 |
+| **极速四元数协议** | 纯四元数数据帧 (48B/帧)，彻底移除欧拉角与温度冗余 |
+| **5帧聚合 ESP-NOW** | 1000Hz 解算 / 200Hz 广播，248B 载荷完美贴附 250B 物理上限 |
+| **动态 MAC 衍生 ID** | MAC 末字节自动推演 Node ID，单一固件 12 节点无脑烧录 |
+| **全局时钟同步** | 三步同步协议，多节点微秒级时间对齐 |
+| **零 malloc DMA 缓冲** | init 时预分配 32B DMA 缓冲，1kHz 读取零内存碎片 |
+| **防死锁异步收发** | ESP-NOW recv 回调零阻塞，队列 + 专用任务级发送 |
 
-## 架构亮点
+## 项目结构
 
-### 双独立 SPI 并发 (SPI2 & SPI3)
-
-物理层彻底隔离，IMU-A 使用 SPI2_HOST，IMU-B 使用 SPI3_HOST，各自拥有独立的 SCLK/MOSI/MISO 总线。零总线冲突，DMA 吞吐量翻倍，双路数据可在 1 个 SPI 时钟周期内并发读取。
-
-### 双硬件中断严格同步 (Dual INT1 Sync)
-
-两颗 IMU 的 INT1 引脚分别接入 ESP32-S3 的独立 GPIO（IO14 / IO38），主循环在读取前必须阻塞等待双路 Data Ready 中断均触发。消除双晶振长时运行时钟漂移导致的数据时间错位。
-
-### LDO 强控上电时序
-
-GPIO4 / GPIO5 独立控制两路 TPS7A2033 LDO 使能端。app_main 启动时先拉高 LDO_EN 并强制等待 50ms，确保传感器端电压稳压完成、芯片内部复位彻底结束后再执行 SPI 初始化，从物理层杜绝错过首个中断沿的隐患。
-
-### 6-状态 ESKF (误差状态卡尔曼滤波)
-
-抛弃传统 Mahony 互补滤波器。采用纯 C 展开的 6×6 矩阵序贯更新（Sequential Update），3 次标量运算替代矩阵求逆，零动态内存分配。状态向量：角度误差 (3) + 陀螺仪零偏 (3)。核心函数运行于 Flash XIP，不占用宝贵的 IRAM。
-
-### 物理极限通信 (248B 聚合帧)
-
-彻底移除冗余的欧拉角和温度字段，采用纯四元数数据帧（48 Bytes/帧）。5 帧聚合策略产生 248 字节的 ESP-NOW 载荷，严格贴附 250 Bytes 物理上限。1000Hz 解算 / 200Hz 物理广播，完美支撑 12 节点高并发全身动作捕捉。
-
-### 动态 MAC 衍生 Node ID
-
-摒弃硬编码，启动时直接从 WiFi MAC 地址末字节推演 Node ID。单一固件，无脑烧录 12 块 ESP32 即可自动组网。
+```
+ESP_ICM42688/
+├── components/
+│   ├── icm42688/
+│   │   ├── include/
+│   │   │   ├── icm42688.h            # SPI 驱动 + 中断 API
+│   │   │   ├── icm42688_reg.h        # 寄存器定义 & 量程枚举
+│   │   │   ├── icm42688_alg.h        # 四元数/欧拉角工具
+│   │   │   ├── icm42688_dual.h       # 双路融合 + 矩阵运算
+│   │   │   └── hardcore_eskf.h       # 6状态 ESKF 滤波器
+│   │   └── src/
+│   │       ├── icm42688.c            # SPI 驱动 + DMA 缓冲 + 中断 ISR
+│   │       ├── icm42688_alg.c        # 四元数工具
+│   │       ├── icm42688_dual.c       # 双路融合 → ESKF
+│   │       └── hardcore_eskf.c       # ESKF 核心 (Flash XIP)
+│   └── net_send/
+│       ├── include/
+│       │   ├── net_send.h            # ESP-NOW + 聚合包定义
+│       │   └── time_sync.h           # 全局时钟同步协议
+│       └── src/
+│           ├── net_send.c            # ESP-NOW + NVS + 异步收发
+│           └── time_sync.c           # 三步时钟同步
+├── main/main.c                       # 主程序: LDO→SPI→校准→双中断→融合→聚合
+├── examples/espnow_receiver/         # 接收端示例
+├── tools/                            # Python 监控/接收脚本
+├── partitions_8mb.csv                # 自定义分区表
+└── sdkconfig.defaults                # 含 IRAM/Flash/PSRAM 优化配置
+```
 
 ## 硬件连接
 
@@ -43,35 +59,6 @@ GPIO4 / GPIO5 独立控制两路 TPS7A2033 LDO 使能端。app_main 启动时先
 | INT1 | GPIO 14 | GPIO 38 |
 | LDO EN | GPIO 4 | GPIO 5 |
 
-## 项目结构
-
-```
-ESP_ICM42688/
-├── components/
-│   ├── icm42688/
-│   │   ├── include/
-│   │   │   ├── icm42688.h            # SPI 驱动 + 中断 API
-│   │   │   ├── icm42688_reg.h        # 寄存器定义
-│   │   │   ├── icm42688_alg.h        # 四元数工具 + 滤波器
-│   │   │   ├── icm42688_dual.h       # 双路融合 + 矩阵运算
-│   │   │   └── hardcore_eskf.h       # 6-ESKF 滤波器
-│   │   └── src/
-│   │       ├── icm42688.c            # SPI 驱动 + DMA 缓冲 + 中断 ISR
-│   │       ├── icm42688_alg.c        # 四元数/欧拉角工具
-│   │       ├── icm42688_dual.c       # 双路融合 → ESKF
-│   │       └── hardcore_eskf.c       # ESKF 核心 (Flash XIP)
-│   └── net_send/
-│       ├── include/
-│       │   ├── net_send.h            # ESP-NOW + 聚合包定义
-│       │   └── time_sync.h           # 全局时钟同步协议
-│       └── src/
-│           ├── net_send.c            # ESP-NOW + NVS + 异步收发
-│           └── time_sync.c           # 三步时钟同步
-├── main/main.c                       # 主程序: LDO→SPI→校准→双中断→融合→聚合
-├── examples/espnow_receiver/         # 接收端示例
-└── tools/                            # Python 监控/接收脚本
-```
-
 ## 快速开始
 
 ```bash
@@ -81,195 +68,82 @@ idf.py build
 idf.py -p COMx flash monitor
 ```
 
-## 关键参数
+接收端：将 `examples/espnow_receiver/` 烧录到另一块 ESP32 即可自动接收。
 
-| 参数 | 值 | 说明 |
-|------|-----|------|
-| IMU 采样率 | 1000Hz | 中断驱动，双路严格同步 |
-| 融合算法 | 6-ESKF | 零矩阵求逆，纯标量序贯更新 |
-| ESP-NOW 发送率 | 200Hz | 5帧聚合，248B/包 |
-| 单帧大小 | 48 Bytes | accel(12) + gyro(12) + quat(16) + ts(8) |
-| 聚合包大小 | 248 Bytes | 8B header + 5×48B < 250B 上限 |
-| 支持节点数 | 12 | 动态 MAC 衍生 ID，零配置 |
-| 全局时钟精度 | ~10-50μs | 三步同步协议 |
-| SPI 时钟 | 10 MHz | 独立 DMA 通道 |
-| Flash | 8 MB | 含 bootloader + 分区表 |
-| PSRAM | 16 MB | WiFi/LWIP 协议栈使用 |
-
-## License
-
-MIT
-ESP_ICM42688/
-├── CMakeLists.txt                    # 顶层项目构建
-├── README.md
-├── HARDWARE_CONFIG.md                # 硬件配置说明 (8MB Flash / 16MB PSRAM)
-├── partitions_8mb.csv                # 自定义分区表 (3MB app + 5MB storage)
-├── sdkconfig.defaults                # 含 IRAM 优化配置
-├── components/
-│   ├── icm42688/                     # ICM-42688 驱动 + 解算库
-│   │   ├── include/
-│   │   │   ├── icm42688.h            # SPI 驱动 + 中断 API
-│   │   │   ├── icm42688_reg.h        # 寄存器定义 & 量程枚举
-│   │   │   ├── icm42688_alg.h        # 四元数/欧拉角工具 + 滤波器
-│   │   │   ├── icm42688_dual.h       # 双 IMU 融合 + 3x3 矩阵运算
-│   │   │   └── hardcore_eskf.h       # 6状态 ESKF 滤波器
-│   │   └── src/
-│   │       ├── icm42688.c            # SPI 驱动 + 中断 ISR
-│   │       ├── icm42688_alg.c        # 四元数/欧拉角工具
-│   │       ├── icm42688_dual.c       # 双路融合 (调用 ESKF)
-│   │       └── hardcore_eskf.c       # ESKF 核心 (IRAM_ATTR)
-│   └── net_send/                     # 网络发送 + 时间同步组件
-│       ├── include/
-│       │   ├── net_send.h            # ESP-NOW 广播 API
-│       │   └── time_sync.h           # 全局时钟同步协议
-│       └── src/
-│           ├── net_send.c            # ESP-NOW 广播 + 同步包处理
-│           └── time_sync.c           # 三步时钟同步实现
-├── main/
-│   ├── CMakeLists.txt
-│   └── main.c                        # 主程序: 中断驱动 + 双 IMU + ESP-NOW
-├── examples/
-│   └── espnow_receiver/              # ESP-NOW 接收端示例
-│       ├── CMakeLists.txt
-│       └── main/main.c
-└── tools/
-    ├── espnow_monitor.py             # 串口监控脚本
-    ├── server_udp.py                 # Python UDP 接收服务器
-    └── server_http.py                # Python HTTP 接收服务器
-```
-
-## 🔌 硬件连接
-
-### IMU-A (SPI2)
-
-| 信号 | GPIO | 说明 |
-|------|------|------|
-| SCLK | 12 | SPI 时钟 |
-| MOSI | 11 | 主出从入 |
-| MISO | 13 | 主入从出 |
-| CS | 10 | 片选 |
-| **INT1** | **46** | **Data Ready 中断输出** |
-
-### IMU-B (SPI3)
-
-| 信号 | GPIO | 说明 |
-|------|------|------|
-| SCLK | 36 | SPI 时钟 |
-| MOSI | 35 | 主出从入 |
-| MISO | 37 | 主入从出 |
-| CS | 34 | 片选 |
-| **INT1** | **9** | **Data Ready 中断输出** |
-
-> 如果两路 SPI 共享总线，可共用 SCLK/MOSI/MISO，仅需不同 CS 引脚。INT 引脚必须独立连接到各自的 GPIO。
-
-## 🚀 快速开始
-
-### 1. 环境准备
-
-- [ESP-IDF v5.5+](https://docs.espressif.com/projects/esp-idf/zh_CN/latest/esp32s3/get-started/)
-- VS Code + ESP-IDF 扩展（推荐）
-
-### 2. 配置引脚
-
-编辑 `main/main.c` 顶部的宏定义：
-
-```c
-#define PIN_SCLK_A    12
-#define PIN_MOSI_A    11
-#define PIN_MISO_A    13
-#define PIN_CS_A      10
-#define PIN_INT_A     46     /* IMU-A 中断引脚 */
-// ... IMU-B 类似
-#define NODE_ID       0x01   /* 节点 ID (时间同步用, 每个节点唯一) */
-```
-
-### 3. 编译烧录
-
-```bash
-idf.py set-target esp32s3
-idf.py reconfigure     # 应用 sdkconfig.defaults (IRAM 优化等)
-idf.py build
-idf.py -p COMx flash monitor
-```
-
-### 4. 接收数据
-
-将 `examples/espnow_receiver/` 烧录到另一块 ESP32：
-
-```bash
-cd examples/espnow_receiver
-idf.py set-target esp32s3
-idf.py build flash monitor
-```
-
-## 🧠 架构设计
+## 架构设计
 
 ### 系统架构
 
 ```mermaid
 flowchart TB
     subgraph ESP32S3["ESP32-S3 主节点"]
-        direction TB
-        ISR_A["GPIO ISR<br/>INT1(46)"] --> SEM["二值信号量"]
-        ISR_B["GPIO ISR<br/>INT1(9)"] --> SEM
-        SEM --> TASK["高优先级读取任务<br/>wait_drdy → burst read<br/>→ 双路融合 → 6-ESKF 解算"]
-        SYNC["时间同步<br/>收到 SYNC_START 自动回复"]
+        LDO["LDO EN (IO4/IO5) 延时50ms稳压"] --> SPI_INIT
+
+        subgraph SPI_INIT["双路独立 SPI"]
+            SPI2["SPI2_HOST SCLK=48 MOSI=47 MISO=21 CS=45"]
+            SPI3["SPI3_HOST SCLK=41 MOSI=40 MISO=39 CS=42"]
+        end
+
+        ISR_A["GPIO ISR INT1(14)"] --> SYNC_DUAL["双中断严格同步 阻塞等待双路DRDY"]
+        ISR_B["GPIO ISR INT1(38)"] --> SYNC_DUAL
+
+        SPI2 --> READ["burst read 14B DMA零malloc"]
+        SPI3 --> READ
+
+        SYNC_DUAL --> READ --> FUSE["双路交叉融合 + 安装误差补偿"]
+        FUSE --> ESKF["6-ESKF 解算 序贯更新 6x6 矩阵 Flash XIP"]
+        ESKF --> AGG["5帧聚合缓冲 248B = 8B头 + 5x48B"]
     end
 
-    IMU_A["ICM42688-A<br/>SPI2"] -->|SPI| ISR_A
-    IMU_B["ICM42688-B<br/>SPI3"] -->|SPI| ISR_B
-
-    TASK -->|"ESP-NOW 广播<br/>64B 二进制包"| BROADCAST{{"ESP-NOW 广播<br/>同信道所有设备"}}
-
-    BROADCAST --> R1["接收端1<br/>ESP32"]
-    BROADCAST --> R2["接收端2<br/>RK3566"]
-    BROADCAST --> RN["接收端N<br/>PC"]
-    SYNC -.->|"时间同步包"| BROADCAST
+    AGG -->|"ESP-NOW 广播 200Hz"| BC{{"ESP-NOW 广播"}}
+    BC --> R1["接收端1 ESP32"]
+    BC --> R2["接收端2 RK3566"]
+    BC --> RN["接收端N PC"]
 ```
 
-### 中断驱动 vs 轮询
-
-| | 轮询 (旧) | 中断驱动 (新) |
-|---|---|---|
-| **CPU 占用** | ~100% (vTaskDelay 忙等) | ~5% (信号量阻塞让出 CPU) |
-| **延迟** | 取决于 vTaskDelay 周期 | 中断触发后 ~10μs 响应 |
-| **功耗** | 高 (CPU 持续运行) | 低 (CPU 睡眠等待中断) |
-| **实时性** | 受其他任务干扰 | 由硬件中断保证 |
-
-### 双路融合流程
+### 硬件资源分配
 
 ```mermaid
 flowchart LR
-    A["IMU-A<br/>读取"] --> TA["坐标变换"]
-    B["IMU-B<br/>读取"] --> AL["安装补偿"]
+    subgraph IRAM["16KB IRAM"]
+        ISR["GPIO ISR ~200B"]
+        WIFI_TX["WiFi TX回调 ~1KB"]
+        SPI_SPIKE["SPI中断处理 ~200B"]
+    end
+    subgraph DIRAM["340KB DIRAM"]
+        RTOS["FreeRTOS 调度器"]
+        WIFI_BUF["WiFi/LWIP 协议栈"]
+        DMA_BUF["DMA 缓冲区"]
+    end
+    subgraph FLASH["8MB Flash (L1 Cache)"]
+        ESKF_CODE["ESKF 6x6 矩阵运算 ~4KB XIP"]
+        DRIVER["SPI 驱动 + 传感器配置"]
+        APPLICATION["应用逻辑"]
+    end
+```
 
-    TA --> FUSE{{"加权融合"}}
-    AL --> FUSE
+### 双硬件中断严格同步
 
-    CC["交叉校验<br/>& 异常检测"] -.-> FUSE
+两路 IMU 各自通过 INT1 引脚连接独立 GPIO。主循环阻塞等待双路 Data Ready 均触发后才进入读取，彻底消除双晶振长时运行导致的时钟漂移：
 
-    FUSE --> PRED["eskf_predict<br/>预测步<br/>(陀螺仪积分)"]
-    PRED --> UPD["eskf_update_accel<br/>更新步<br/>(加速度校正)"]
-    UPD --> OUT["四元数 / 欧拉角"]
+```
+ICM42688-A INT1 → GPIO14 → ISR → ┐
+                                    ├→ 信号量 → 高优先级任务唤醒
+ICM42688-B INT1 → GPIO38 → ISR → ┘
+                                   (任一路超时2ms则降级读取单路)
 ```
 
 ### 6状态 ESKF 算法
 
-采用 **Error-State Kalman Filter**（误差状态卡尔曼滤波器），相比传统 Mahony 互补滤波器具有更高精度和更强的噪声抑制能力：
+采用 Error-State Kalman Filter，纯 C 展开 6x6 矩阵运算，**无 malloc、无锁、零矩阵求逆**：
 
 | 特性 | 说明 |
 |------|------|
 | **状态维度** | 6维：角度误差(3) + 陀螺仪零偏(3) |
-| **预测步** | 陀螺仪积分更新名义四元数，协方差矩阵 F 传播 |
-| **更新步** | 加速度计序贯更新，3次标量运算替代矩阵求逆 |
+| **预测步** | 陀螺仪积分更新名义四元数，F 矩阵传播协方差 |
+| **更新步** | 加速度计序贯更新，3次标量运算（彻底消灭矩阵求逆） |
 | **零偏估计** | 实时估计并补偿陀螺仪零偏漂移 |
-| **IRAM 优化** | 核心运算函数标记 `IRAM_ATTR`，确保中断级实时性 |
-| **零动态内存** | 全部 6×6 矩阵运算在栈上完成，无 malloc |
-
-**调参指南**：
-- `noise_gyro` (默认 0.001)：陀螺仪白噪声方差，增大则更信任加速度计
-- `noise_bias` (默认 0.0001)：零偏随机游走方差，增大则零偏收敛更快
-- `noise_accel` (默认 0.05)：加速度计噪声方差，增大则加速度修正更保守
+| **内存布局** | ISR 常驻 IRAM；RTOS 运行 DIRAM；ESKF 代码运行 Flash XIP |
 
 ### 全局时钟同步协议
 
@@ -277,79 +151,84 @@ flowchart LR
 sequenceDiagram
     participant H as 主机 (RK3566)
     participant N as 节点 (ESP32)
-
-    H->>N: SYNC_START<br/>T_host_send
+    H->>N: SYNC_START (T_host_send)
     Note over N: 记录 T_node_rx
-    N->>H: SYNC_REPLY<br/>T_node_rx
-
-    Note over H: RTT = T_host_rx - T_host_send<br/>offset = (T_host_send + T_host_rx)/2 - T_node_rx
-    H->>N: SYNC_APPLY<br/>offset_us
-    Note over N: 应用 offset<br/>后续时间戳 = 本地时间 + offset
-
-    Note over H,N: 每秒重复，精度 ~10-50μs
+    N->>H: SYNC_REPLY (T_node_rx)
+    Note over H: RTT = T_host_rx - T_host_send offset = (T_host_send + T_host_rx)/2 - T_node_rx
+    H->>N: SYNC_APPLY (offset_us)
+    Note over N: 后续时间戳 = 本地时间 + offset
+    Note over H,N: 每秒重复，精度 ~10-50us
 ```
 
-## 📡 数据协议
+## 数据协议
 
-### ESP-NOW 广播数据包（64 字节，小端序）
+### 聚合数据包 (极速四元数模式)
 
-| 偏移 | 类型 | 字段 | 说明 |
+**单帧: 48 Bytes** — 仅保留四元数 + 惯性数据，彻底剔除欧拉角与温度冗余。
+
+| 偏移 | 类型 | 字段 | 大小 |
 |------|------|------|------|
-| 0~11 | float×3 | accel | 加速度 (g) |
-| 12~23 | float×3 | gyro | 陀螺仪 (dps) |
-| 24~27 | float | temp | 温度 (°C) |
-| 28~43 | float×4 | quat | 四元数 [w,x,y,z] |
-| 44~55 | float×3 | euler | 欧拉角 [roll,pitch,yaw] (°) |
-| 56~63 | uint64 | timestamp_us | **全局同步时间戳** (μs) |
+| 0~11 | float x3 | accel (g) | 12B |
+| 12~23 | float x3 | gyro (dps) | 12B |
+| 24~39 | float x4 | quat [w,x,y,z] | 16B |
+| 40~47 | uint64 | timestamp_us | 8B |
 
-### 时间同步包（13 字节）
+**聚合包: 248 Bytes** — 8B 包头 + 5x48B 帧，严格 < 250B ESP-NOW 物理上限。
 
-| 偏移 | 类型 | 字段 | 说明 |
-|------|------|------|------|
-| 0 | uint8 | type | 0xFD (时间同步专用) |
-| 1 | uint8 | node_id | 节点 ID |
-| 2~5 | uint32 | seq | 序列号 |
-| 6~13 | int64 | host_time_us | 主机时间戳 |
-| 14~21 | int64 | node_time_us | 节点时间戳 |
-| 22~29 | int64 | offset_us | 时间偏移 |
+| 偏移 | 字段 | 说明 |
+|------|------|------|
+| 0~3 | magic | `{'I','M','U','A'}` |
+| 4 | node_id | MAC 衍生动态 ID |
+| 5 | frame_count | 1~5 |
+| 6~7 | reserved | 对齐 |
+| 8~247 | frames[5] | 5帧 IMU 数据 |
 
-## 🔧 硬件配置
+### 时间同步包 (13 字节)
 
-本项目默认配置：
-- **Flash**: 8MB
-- **PSRAM**: 16MB (Quad, 80MHz)
-- **分区表**: `partitions_8mb.csv` (3MB app + 5MB storage)
-- **IRAM 优化**: 关闭 Secure Boot / Core dump / WiFi 日志等
+| 偏移 | 类型 | 字段 |
+|------|------|------|
+| 0 | uint8 | type (0xFD) |
+| 1 | uint8 | node_id |
+| 2~5 | uint32 | seq |
+| 6~13 | int64 | host_time_us |
+| 14~21 | int64 | node_time_us |
+| 22~29 | int64 | offset_us |
 
-详见 [HARDWARE_CONFIG.md](HARDWARE_CONFIG.md)。
+## 关键参数
 
-## 📊 资源占用
+| 参数 | 参数值 |
+|------|--------|
+| Flash | 8MB |
+| PSRAM | 16MB (Quad, 80MHz) |
+| 分区表 | partitions_8mb.csv (3MB app + 5MB storage) |
+| IMU 采样率 | 1000Hz (中断驱动，双路严格同步) |
+| ESP-NOW 发送率 | 200Hz (5帧聚合) |
+| 单包载荷 | 248B < 250B 上限 |
+| 支持节点数 | 12 (动态 MAC ID，零配置) |
+| 全局时钟精度 | ~10-50us |
 
-| 资源 | 使用量 | 说明 |
-|------|--------|------|
-| Flash | ~561 KB | 代码 + 数据 |
-| DIRAM | 31.8% | 含 WiFi/BT 协议栈 |
-| IRAM | 100% → 优化后 ~80% | IRAM 优化后释放给 ESP-NOW |
-
-## 📝 串口输出示例
+## 串口输出示例
 
 ```
-=== 双 ICM-42688-P AHRS + ESP-NOW Demo ===
-初始化 IMU-A...
-初始化 IMU-B...
-配置中断驱动读取...
-Interrupt configured on GPIO 46 (falling edge, DRDY)
-Interrupt configured on GPIO 9 (falling edge, DRDY)
+=== 双 ICM-42688-P + ESP-NOW ===
+LDO EN1(IO4) + EN2(IO5) 拉高, 等待 50ms 稳压...
+LDO 稳压完成, 开始 SPI 初始化
+SPI2 bus initialized (shared)
+WHO_AM_I = 0x47
+SPI3 bus initialized (shared)
+WHO_AM_I = 0x47
+Interrupt configured on GPIO 14 (falling edge, DRDY)
+Interrupt configured on GPIO 38 (falling edge, DRDY)
 请保持传感器静止, 开始交叉校准...
 校准后加速度 RMSE: 0.0089 g
 === 校准完成 ===
-ESP-NOW + 时间同步就绪 (node_id=0x01)
-=== 开始双路融合解算 (100Hz, 中断驱动) ===
+ESP-NOW 就绪 (MAC:AA:BB:CC:DD:EE:FF → node_id=0xFF)
+=== 极速四元数模式 (1000Hz采样, 5帧聚合→200Hz发送) ===
 
-[200] R=  1.2° P= -0.8° Y=  45.3° | Conf=98% | ΔA=0.012g ΔG=2.3dps | TX✓
-  IMU-A: ON (IRQ:200) | IMU-B: ON (IRQ:200) | Sync:OK #15
+[20] QW=0.9998 Conf=98% | TX✓ | TX:200
+  IMU-A: ON (IRQ:20000) | IMU-B: ON (IRQ:20000) | Sync:OK #100
 ```
 
-## 📜 License
+## License
 
 MIT
