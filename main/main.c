@@ -1,29 +1,26 @@
 /**
  * @file main.c
- * @brief 双 ICM-42688-P 融合解算 + WiFi 数据上报
+ * @brief 双 ICM-42688-P 融合解算 + ESP-NOW 广播
  *
- * 硬件连接 (ESP32-S3 常见引脚, 可自行修改):
+ * 硬件连接:
+ *   IMU-A (SPI2):  SCLK=48 MOSI=47 MISO=21 CS=45 INT1=14 LDO_EN1=4
+ *   IMU-B (SPI3):  SCLK=41 MOSI=40 MISO=39 CS=42 INT1=38 LDO_EN2=5
  *
- *   两路 IMU 共享 SPI2 总线:
- *     SCLK → GPIO 12
- *     MOSI → GPIO 11
- *     MISO → GPIO 13
- *     CS_A → GPIO 10
- *     CS_B → GPIO 34
- *   
  * 功能:
- *   1. 双 IMU 同步读取
+ *   1. 双路独立 SPI 并发读取
  *   2. 交叉校准 (自动检测安装偏差角)
- *   3. 加权互补滤波融合
+ *   3. 6-ESKF 融合解算
  *   4. 异常值检测 & 单路降级
- *   5. WiFi UDP 实时发送融合结果
+ *   5. ESP-NOW 广播聚合数据
  *
  * 优化:
- *   A. 中断驱动读取 (INT1 → GPIO 中断 → 信号量唤醒任务)
- *   B. IRAM 优化 (sdkconfig.defaults)
- *   C. 全局时间戳同步 (主机广播 offset, 节点校正) *  D. SPI 共享总线 (统一 SPI2_HOST, 不同 CS)
- *  E. 零 malloc DMA 缓冲 (init 时预分配 32B)
- *  F. 10帧聚合发送 (1000Hz采样 → 100Hz发送) */
+ *   A. LDO 强控上电时序 (50ms 延迟, 防错过首个中断)
+ *   B. 双路独立 SPI2/SPI3 (绝对并发, 无总线竞争)
+ *   C. 中断驱动读取 (INT1 → GPIO 中断 → 信号量)
+ *   D. 零 malloc DMA 缓冲 (init 时预分配 32B)
+ *   E. 10帧聚合发送 (1000Hz采样 → 100Hz发送)
+ *   F. 防死锁异步 ESP-NOW 收发
+ */
 
 #include <stdio.h>
 #include <math.h>
@@ -41,20 +38,30 @@
 static const char *TAG = "main";
 
 /* ============================================================
- *  SPI 共享总线引脚 (统一使用 SPI2_HOST)
+ *  LDO 电源使能引脚
  * ============================================================ */
-#define PIN_SCLK      12
-#define PIN_MOSI      11
-#define PIN_MISO      13
-#define PIN_CS_A      10
-#define PIN_CS_B      34
-#define SPI_HOST      SPI2_HOST
+#define PIN_LDO_EN1   4      /* IMU-A LDO 使能 */
+#define PIN_LDO_EN2   5      /* IMU-B LDO 使能 */
 
 /* ============================================================
- *  中断引脚
+ *  IMU-A 引脚 (SPI2)
  * ============================================================ */
-#define PIN_INT_A     46     /* IMU-A INT1 引脚 */
-#define PIN_INT_B     9      /* IMU-B INT1 引脚 */
+#define PIN_SCLK_A    48
+#define PIN_MOSI_A    47
+#define PIN_MISO_A    21
+#define PIN_CS_A      45
+#define PIN_INT_A     14
+#define SPI_HOST_A    SPI2_HOST
+
+/* ============================================================
+ *  IMU-B 引脚 (SPI3)
+ * ============================================================ */
+#define PIN_SCLK_B    41
+#define PIN_MOSI_B    40
+#define PIN_MISO_B    39
+#define PIN_CS_B      42
+#define PIN_INT_B     38
+#define SPI_HOST_B    SPI3_HOST
 
 /* ============================================================
  *  节点 ID (用于时间同步, 每个节点唯一)
@@ -86,26 +93,46 @@ static const char *TAG = "main";
  * ============================================================ */
 void app_main(void)
 {
-    ESP_LOGI(TAG, "=== 双 ICM-42688-P AHRS + ESP-NOW Demo ===");
+    ESP_LOGI(TAG, "=== 双 ICM-42688-P + ESP-NOW ===");
 
-    /* ---- 1. IMU-A SPI 配置 (共享总线, 仅 CS 不同) ---- */
+    /* ================================================================
+     *  LDO 强控上电时序 (任务2)
+     *  在任何 SPI/IMU 初始化之前, 先使能 LDO 并等待 50ms,
+     *  确保传感器端电压稳压完成、芯片内部复位彻底结束,
+     *  杜绝错过首个中断沿的隐患。
+     * ================================================================ */
+    gpio_config_t ldo_io = {
+        .pin_bit_mask = (1ULL << PIN_LDO_EN1) | (1ULL << PIN_LDO_EN2),
+        .mode         = GPIO_MODE_OUTPUT,
+        .pull_up_en   = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&ldo_io);
+    gpio_set_level(PIN_LDO_EN1, 1);  /* 使能 IMU-A LDO */
+    gpio_set_level(PIN_LDO_EN2, 1);  /* 使能 IMU-B LDO */
+    ESP_LOGI(TAG, "LDO EN1(IO%d) + EN2(IO%d) 拉高, 等待 50ms 稳压...", PIN_LDO_EN1, PIN_LDO_EN2);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    ESP_LOGI(TAG, "LDO 稳压完成, 开始 SPI 初始化");
+
+    /* ---- 1. IMU-A SPI 配置 (独立 SPI2) ---- */
     icm42688_spi_cfg_t spi_cfg_a = {
-        .spi_host       = SPI_HOST,
-        .pin_sclk       = PIN_SCLK,
-        .pin_mosi       = PIN_MOSI,
-        .pin_miso       = PIN_MISO,
+        .spi_host       = SPI_HOST_A,
+        .pin_sclk       = PIN_SCLK_A,
+        .pin_mosi       = PIN_MOSI_A,
+        .pin_miso       = PIN_MISO_A,
         .pin_cs         = PIN_CS_A,
         .pin_int        = PIN_INT_A,
         .clock_speed_hz = 10000000,
     };
 
-    /* ---- 2. IMU-B SPI 配置 (共用总线, 不同 CS) ---- */
+    /* ---- 2. IMU-B SPI 配置 (独立 SPI3) ---- */
     icm42688_spi_cfg_t spi_cfg_b = {
-        .spi_host       = SPI_HOST,  /* 同一 SPI 主机 */
-        .pin_sclk       = PIN_SCLK,  /* 共享引脚 */
-        .pin_mosi       = PIN_MOSI,
-        .pin_miso       = PIN_MISO,
-        .pin_cs         = PIN_CS_B,  /* 不同 CS */
+        .spi_host       = SPI_HOST_B,
+        .pin_sclk       = PIN_SCLK_B,
+        .pin_mosi       = PIN_MOSI_B,
+        .pin_miso       = PIN_MISO_B,
+        .pin_cs         = PIN_CS_B,
         .pin_int        = PIN_INT_B,
         .clock_speed_hz = 10000000,
     };

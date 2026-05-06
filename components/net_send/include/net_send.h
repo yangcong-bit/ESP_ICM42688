@@ -136,6 +136,30 @@ bool net_http_send_json(const char *json_str);
 void net_deinit(void);
 
 /* ============================================================
+ *  聚合数据包 (10帧合1包, 降低物理帧头开销)
+ * ============================================================ */
+#define NET_AGGREGATE_FRAMES  10
+
+/* 单帧紧凑数据 */
+typedef struct __attribute__((packed)) {
+    float    accel[3];        /* 加速度 (g) */
+    float    gyro[3];         /* 陀螺仪 (dps) */
+    float    quat[4];         /* 四元数 [w, x, y, z] */
+    float    euler[3];        /* 欧拉角 [roll, pitch, yaw] */
+    float    temp;            /* 温度 (°C) */
+    uint64_t timestamp_us;    /* 全局同步时间戳 (μs) */
+} net_frame_t;  /* 52 bytes */
+
+/* 聚合包: header + N帧 */
+typedef struct __attribute__((packed)) {
+    uint8_t  magic[4];        /* {'I','M','U','A'} */
+    uint8_t  node_id;         /* 节点 ID */
+    uint8_t  frame_count;     /* 本包包含的帧数 (1~10) */
+    uint16_t reserved;        /* 保留/对齐 */
+    net_frame_t frames[NET_AGGREGATE_FRAMES];
+} net_aggregated_packet_t;
+
+/* ============================================================
  *  API — ESP-NOW 统计
  * ============================================================ */
 
@@ -185,14 +209,7 @@ uint32_t net_time_sync_count(void);
  * ============================================================ */
 
 /**
- * @brief 设置本节点 ID (发送时写入聚合包头)
- */
-void net_set_node_id(uint8_t id);
-
-/**
  * @brief 发送聚合 IMU 数据包 (10帧合1)
- * @param agg 聚合包指针
- * @return true 发送成功
  */
 bool net_udp_send_aggregated(const net_aggregated_packet_t *agg);
 

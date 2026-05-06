@@ -24,7 +24,7 @@ void eskf_init(eskf_t *eskf, eskf_nominal_state_t *nominal) {
 }
 
 // 预测步：用陀螺仪积分，更新名义状态和协方差
-void IRAM_ATTR eskf_predict(eskf_t *eskf, eskf_nominal_state_t *nominal, const float gyro[3], float dt) {
+void eskf_predict(eskf_t *eskf, eskf_nominal_state_t *nominal, const float gyro[3], float dt) {
     // 1. 扣除零偏后的真实角速度
     float wx = gyro[0] - nominal->bg[0];
     float wy = gyro[1] - nominal->bg[1];
@@ -93,7 +93,7 @@ void IRAM_ATTR eskf_predict(eskf_t *eskf, eskf_nominal_state_t *nominal, const f
 }
 
 // 测量步：利用加速度计校准 Pitch 和 Roll (利用序贯更新，斩断矩阵求逆)
-void IRAM_ATTR eskf_update_accel(eskf_t *eskf, eskf_nominal_state_t *nominal, const float accel[3]) {
+void eskf_update_accel(eskf_t *eskf, eskf_nominal_state_t *nominal, const float accel[3]) {
     // 归一化加速度测量值
     float a_norm = sqrtf(accel[0]*accel[0] + accel[1]*accel[1] + accel[2]*accel[2]);
     if (a_norm < 0.1f) return; // 自由落体保护

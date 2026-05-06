@@ -182,6 +182,7 @@ icm42688_err_t icm42688_init(icm42688_dev_t *dev,
 
     /* ---- SPI 总线初始化 (仅首次, 共享总线场景) ---- */
     int host_idx = spi_cfg->spi_host;
+    esp_err_t ret;
     if (host_idx >= 0 && host_idx < SPI_HOST_MAX && !s_spi_bus_inited[host_idx]) {
         spi_bus_config_t bus_cfg = {
             .mosi_io_num   = spi_cfg->pin_mosi,
@@ -191,7 +192,7 @@ icm42688_err_t icm42688_init(icm42688_dev_t *dev,
             .quadhd_io_num = -1,
             .max_transfer_sz = 64,
         };
-        esp_err_t ret = spi_bus_initialize(spi_cfg->spi_host, &bus_cfg, SPI_DMA_CH_AUTO);
+        ret = spi_bus_initialize(spi_cfg->spi_host, &bus_cfg, SPI_DMA_CH_AUTO);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "SPI bus init failed: %s", esp_err_to_name(ret));
             return ICM42688_ERR_SPI_INIT;
