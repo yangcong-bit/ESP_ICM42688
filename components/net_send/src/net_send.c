@@ -13,6 +13,9 @@
 #include "esp_log.h"
 #include "esp_wifi.h"
 #include "esp_now.h"
+#include "nvs_flash.h"
+#include "esp_netif.h"
+#include "esp_event.h"
 #include "esp_event.h"
 #include <string.h>
 #include <stdio.h>
@@ -102,9 +105,21 @@ static void espnow_recv_cb(const esp_now_recv_info_t *info, const uint8_t *data,
  * ============================================================ */
 static bool wifi_lowlevel_init(void)
 {
-    /* 初始化 WiFi 驱动 (STA 模式, 但不连接任何 AP) */
+    /* 1. 初始化 NVS (WiFi 驱动需要 NVS 存储射频校准数据) */
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    /* 2. 初始化底层网络接口和默认事件循环 */
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    /* 3. 初始化 WiFi 驱动 (STA 模式, 但不连接任何 AP) */
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    esp_err_t ret = esp_wifi_init(&cfg);
+    ret = esp_wifi_init(&cfg);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "WiFi init failed: %s", esp_err_to_name(ret));
         return false;

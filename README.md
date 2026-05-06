@@ -1,29 +1,104 @@
-# ESP32-S3 双 ICM-42688 融合姿态解算系统
+# SomatoSync — 康复医疗全身动作追踪节点
 
-基于 ESP32-S3 + 双路 ICM-42688-P IMU 的实时姿态解算系统，支持 ESP-NOW 无线广播、中断驱动读取、全局时钟同步。
+> 基于 ESP32-S3 + 双路 ICM-42688-P 的高频体态监测节点，面向 12 节点全身动作捕捉场景。
 
-## ✨ 功能特性
+## 系统概述
 
-| 模块 | 功能 |
-|------|------|
-| **双路独立 SPI (SPI2+SPI3)** | 完全独立物理双路 SPI 通道，无总线复用，绝对并发读取 |
-| **LDO 强控上电时序** | IO4/IO5 控制 LDO_EN，延时 50ms 确保中断启动绝对稳定 |
-| **IRAM 优化 (已解决)** | 移除 ESKF 复杂数学函数的 IRAM_ATTR，释放 IRAM 给中断/WiFi |
-| **极速四元数协议** | 48B/帧纯四元数，5帧聚合248B < 250B ESP-NOW极限 |
-| **200Hz/12节点并发** | 1000Hz采样→5帧聚合→200Hz发送，支撑全身动捕 |
-| **ICM42688 SPI 驱动** | 初始化、burst read 14B、量程配置、偏移校准 |
-| **零内存碎片 DMA 设备** | init 时预分配 32B DMA 缓冲，1kHz 读取零 malloc |
-| **中断驱动读取** | INT1 → GPIO 中断 → 二值信号量 → 高优先级任务唤醒 |
-| **6-ESKF 姿态解算** | 6状态误差卡尔曼滤波，序贯更新零矩阵求逆，医疗级精度 |
-| **双路融合** | 交叉校准、安装误差自动补偿、异常检测、单路降级运行 |
-| **防死锁异步 ESP-NOW** | recv 回调零阻塞，队列 + 专用任务级发送，杜绝 Core Panic |
-| **极速四元数 5帧聚合** | 极速模式: 去除欧拉角冗余，5帧248B极限聚合→200Hz发送，适配12节点全身动捕 |
-| **全局时钟同步** | 主机广播 offset 校正，多节点微秒级时间对齐 |
-| **IRAM 优化** | 关闭无用调试选项，释放 IRAM 给 ESP-NOW/WiFi 协议栈 |
+每个 SomatoSync 节点集成两颗 ICM-42688-P 六轴 IMU，通过完全独立的双路 SPI 总线以 1000Hz 频率采集原始数据，经 6-状态误差卡尔曼滤波器（ESKF）融合后，以 5 帧聚合、200Hz 的频率通过 ESP-NOW 无线广播至主站。所有时间戳经过全局时钟同步，支撑多节点骨骼动画插值。
 
-## 📁 项目结构
+## 架构亮点
+
+### 双独立 SPI 并发 (SPI2 & SPI3)
+
+物理层彻底隔离，IMU-A 使用 SPI2_HOST，IMU-B 使用 SPI3_HOST，各自拥有独立的 SCLK/MOSI/MISO 总线。零总线冲突，DMA 吞吐量翻倍，双路数据可在 1 个 SPI 时钟周期内并发读取。
+
+### 双硬件中断严格同步 (Dual INT1 Sync)
+
+两颗 IMU 的 INT1 引脚分别接入 ESP32-S3 的独立 GPIO（IO14 / IO38），主循环在读取前必须阻塞等待双路 Data Ready 中断均触发。消除双晶振长时运行时钟漂移导致的数据时间错位。
+
+### LDO 强控上电时序
+
+GPIO4 / GPIO5 独立控制两路 TPS7A2033 LDO 使能端。app_main 启动时先拉高 LDO_EN 并强制等待 50ms，确保传感器端电压稳压完成、芯片内部复位彻底结束后再执行 SPI 初始化，从物理层杜绝错过首个中断沿的隐患。
+
+### 6-状态 ESKF (误差状态卡尔曼滤波)
+
+抛弃传统 Mahony 互补滤波器。采用纯 C 展开的 6×6 矩阵序贯更新（Sequential Update），3 次标量运算替代矩阵求逆，零动态内存分配。状态向量：角度误差 (3) + 陀螺仪零偏 (3)。核心函数运行于 Flash XIP，不占用宝贵的 IRAM。
+
+### 物理极限通信 (248B 聚合帧)
+
+彻底移除冗余的欧拉角和温度字段，采用纯四元数数据帧（48 Bytes/帧）。5 帧聚合策略产生 248 字节的 ESP-NOW 载荷，严格贴附 250 Bytes 物理上限。1000Hz 解算 / 200Hz 物理广播，完美支撑 12 节点高并发全身动作捕捉。
+
+### 动态 MAC 衍生 Node ID
+
+摒弃硬编码，启动时直接从 WiFi MAC 地址末字节推演 Node ID。单一固件，无脑烧录 12 块 ESP32 即可自动组网。
+
+## 硬件连接
+
+| 信号 | IMU-A (SPI2) | IMU-B (SPI3) |
+|------|-------------|-------------|
+| SCLK | GPIO 48 | GPIO 41 |
+| MOSI | GPIO 47 | GPIO 40 |
+| MISO | GPIO 21 | GPIO 39 |
+| CS | GPIO 45 | GPIO 42 |
+| INT1 | GPIO 14 | GPIO 38 |
+| LDO EN | GPIO 4 | GPIO 5 |
+
+## 项目结构
 
 ```
+ESP_ICM42688/
+├── components/
+│   ├── icm42688/
+│   │   ├── include/
+│   │   │   ├── icm42688.h            # SPI 驱动 + 中断 API
+│   │   │   ├── icm42688_reg.h        # 寄存器定义
+│   │   │   ├── icm42688_alg.h        # 四元数工具 + 滤波器
+│   │   │   ├── icm42688_dual.h       # 双路融合 + 矩阵运算
+│   │   │   └── hardcore_eskf.h       # 6-ESKF 滤波器
+│   │   └── src/
+│   │       ├── icm42688.c            # SPI 驱动 + DMA 缓冲 + 中断 ISR
+│   │       ├── icm42688_alg.c        # 四元数/欧拉角工具
+│   │       ├── icm42688_dual.c       # 双路融合 → ESKF
+│   │       └── hardcore_eskf.c       # ESKF 核心 (Flash XIP)
+│   └── net_send/
+│       ├── include/
+│       │   ├── net_send.h            # ESP-NOW + 聚合包定义
+│       │   └── time_sync.h           # 全局时钟同步协议
+│       └── src/
+│           ├── net_send.c            # ESP-NOW + NVS + 异步收发
+│           └── time_sync.c           # 三步时钟同步
+├── main/main.c                       # 主程序: LDO→SPI→校准→双中断→融合→聚合
+├── examples/espnow_receiver/         # 接收端示例
+└── tools/                            # Python 监控/接收脚本
+```
+
+## 快速开始
+
+```bash
+idf.py set-target esp32s3
+idf.py reconfigure
+idf.py build
+idf.py -p COMx flash monitor
+```
+
+## 关键参数
+
+| 参数 | 值 | 说明 |
+|------|-----|------|
+| IMU 采样率 | 1000Hz | 中断驱动，双路严格同步 |
+| 融合算法 | 6-ESKF | 零矩阵求逆，纯标量序贯更新 |
+| ESP-NOW 发送率 | 200Hz | 5帧聚合，248B/包 |
+| 单帧大小 | 48 Bytes | accel(12) + gyro(12) + quat(16) + ts(8) |
+| 聚合包大小 | 248 Bytes | 8B header + 5×48B < 250B 上限 |
+| 支持节点数 | 12 | 动态 MAC 衍生 ID，零配置 |
+| 全局时钟精度 | ~10-50μs | 三步同步协议 |
+| SPI 时钟 | 10 MHz | 独立 DMA 通道 |
+| Flash | 8 MB | 含 bootloader + 分区表 |
+| PSRAM | 16 MB | WiFi/LWIP 协议栈使用 |
+
+## License
+
+MIT
 ESP_ICM42688/
 ├── CMakeLists.txt                    # 顶层项目构建
 ├── README.md

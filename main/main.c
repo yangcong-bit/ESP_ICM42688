@@ -34,6 +34,7 @@
 #include "icm42688_dual.h"
 #include "net_send.h"
 #include "time_sync.h"
+#include "esp_wifi.h"
 
 static const char *TAG = "main";
 
@@ -63,10 +64,8 @@ static const char *TAG = "main";
 #define PIN_INT_B     38
 #define SPI_HOST_B    SPI3_HOST
 
-/* ============================================================
- *  节点 ID (用于时间同步, 每个节点唯一)
- * ============================================================ */
-#define NODE_ID       0x01
+/* 节点 ID: 启动时从 MAC 地址低位自动推演, 无需硬编码 */
+static uint8_t s_node_id = 0;
 
 /* ============================================================
  *  传感器参数
@@ -212,9 +211,15 @@ void app_main(void)
     if (!net_udp_init(NULL)) {
         ESP_LOGE(TAG, "ESP-NOW init 失败, 仅串口输出");
     }
-    net_set_node_id(NODE_ID);
+
+    /* 动态 MAC 衍生 Node ID: 取 MAC 末字节, 保证 12 节点唯一 */
+    uint8_t mac[6];
+    esp_wifi_get_mac(WIFI_IF_STA, mac);
+    s_node_id = mac[5];  /* MAC 最后一字节作为 Node ID */
+    net_set_node_id(s_node_id);
     net_time_sync_init();
-    ESP_LOGI(TAG, "ESP-NOW + 时间同步就绪 (node_id=0x%02X)", NODE_ID);
+    ESP_LOGI(TAG, "ESP-NOW 就绪 (MAC:%02X:%02X:%02X:%02X:%02X:%02X → node_id=0x%02X)",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], s_node_id);
 
     /* ---- 8. 主循环 (1000Hz 采样, 5帧聚合 → 200Hz 发送) ---- */
     dual_imu_result_t result;
@@ -224,17 +229,22 @@ void app_main(void)
     /* 聚合缓冲: 攒满 5 帧 (5ms) 再发一次, 248B < 250B ESP-NOW 上限 */
     net_aggregated_packet_t agg_pkt = {
         .magic = {'I', 'M', 'U', 'A'},
-        .node_id = NODE_ID,
+        .node_id = s_node_id,
     };
 
     ESP_LOGI(TAG, "=== 极速四元数模式 (1000Hz采样, 5帧聚合→200Hz发送) ===");
 
     while (1) {
-        /* ---- 中断驱动等待 Data Ready ---- */
-        icm42688_err_t drdy_err = icm42688_wait_drdy(&imu_a, 2);
-        if (drdy_err == ICM42688_ERR_TIMEOUT) {
+        /* ---- 严格双硬件中断同步等待 Data Ready ---- */
+        icm42688_err_t drdy_a = icm42688_wait_drdy(&imu_a, 2);
+        icm42688_err_t drdy_b = icm42688_wait_drdy(&imu_b, 2);
+
+        if (drdy_a == ICM42688_ERR_TIMEOUT && drdy_b == ICM42688_ERR_TIMEOUT) {
+            /* 两路均未就绪 (可能总线或电源异常), 延时防死锁 */
             vTaskDelay(pdMS_TO_TICKS(1));
+            continue;
         }
+        /* 只要有一路触发, 就进入读取与融合 */
 
         /* 双路同步读取 + 融合 */
         err = dual_imu_update(&dual_dev, &result);

@@ -6,6 +6,9 @@ idf_component_register(
         "include"
     REQUIRES
         esp_wifi
+        esp_netif
+        esp_event
+        nvs_flash
         freertos
         log
         esp_timer
