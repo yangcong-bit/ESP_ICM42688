@@ -4,19 +4,12 @@
  *
  * 硬件连接 (ESP32-S3 常见引脚, 可自行修改):
  *
- *   IMU-A (SPI2):
+ *   两路 IMU 共享 SPI2 总线:
  *     SCLK → GPIO 12
  *     MOSI → GPIO 11
  *     MISO → GPIO 13
  *     CS_A → GPIO 10
- *
- *   IMU-B (SPI3, 或与 SPI2 共享总线用不同 CS):
- *     SCLK → GPIO 36
- *     MOSI → GPIO 35
- *     MISO → GPIO 37
  *     CS_B → GPIO 34
- *
- *   如果两路 SPI 共享总线, 可以共用 SCLK/MOSI/MISO, 只需不同 CS
  *   
  * 功能:
  *   1. 双 IMU 同步读取
@@ -28,8 +21,9 @@
  * 优化:
  *   A. 中断驱动读取 (INT1 → GPIO 中断 → 信号量唤醒任务)
  *   B. IRAM 优化 (sdkconfig.defaults)
- *   C. 全局时间戳同步 (主机广播 offset, 节点校正)
- */
+ *   C. 全局时间戳同步 (主机广播 offset, 节点校正) *  D. SPI 共享总线 (统一 SPI2_HOST, 不同 CS)
+ *  E. 零 malloc DMA 缓冲 (init 时预分配 32B)
+ *  F. 10帧聚合发送 (1000Hz采样 → 100Hz发送) */
 
 #include <stdio.h>
 #include <math.h>
@@ -47,24 +41,20 @@
 static const char *TAG = "main";
 
 /* ============================================================
- *  IMU-A 引脚 (SPI2)
+ *  SPI 共享总线引脚 (统一使用 SPI2_HOST)
  * ============================================================ */
-#define PIN_SCLK_A    12
-#define PIN_MOSI_A    11
-#define PIN_MISO_A    13
+#define PIN_SCLK      12
+#define PIN_MOSI      11
+#define PIN_MISO      13
 #define PIN_CS_A      10
-#define PIN_INT_A     46     /* IMU-A INT1 引脚, 用于中断驱动 */
-#define SPI_HOST_A    SPI2_HOST
+#define PIN_CS_B      34
+#define SPI_HOST      SPI2_HOST
 
 /* ============================================================
- *  IMU-B 引脚 (SPI3)
+ *  中断引脚
  * ============================================================ */
-#define PIN_SCLK_B    36
-#define PIN_MOSI_B    35
-#define PIN_MISO_B    37
-#define PIN_CS_B      34
-#define PIN_INT_B     9      /* IMU-B INT1 引脚, 用于中断驱动 */
-#define SPI_HOST_B    SPI3_HOST
+#define PIN_INT_A     46     /* IMU-A INT1 引脚 */
+#define PIN_INT_B     9      /* IMU-B INT1 引脚 */
 
 /* ============================================================
  *  节点 ID (用于时间同步, 每个节点唯一)
@@ -98,25 +88,25 @@ void app_main(void)
 {
     ESP_LOGI(TAG, "=== 双 ICM-42688-P AHRS + ESP-NOW Demo ===");
 
-    /* ---- 1. IMU-A SPI 配置 ---- */
+    /* ---- 1. IMU-A SPI 配置 (共享总线, 仅 CS 不同) ---- */
     icm42688_spi_cfg_t spi_cfg_a = {
-        .spi_host       = SPI_HOST_A,
-        .pin_sclk       = PIN_SCLK_A,
-        .pin_mosi       = PIN_MOSI_A,
-        .pin_miso       = PIN_MISO_A,
+        .spi_host       = SPI_HOST,
+        .pin_sclk       = PIN_SCLK,
+        .pin_mosi       = PIN_MOSI,
+        .pin_miso       = PIN_MISO,
         .pin_cs         = PIN_CS_A,
-        .pin_int        = PIN_INT_A,  /* 中断引脚 */
+        .pin_int        = PIN_INT_A,
         .clock_speed_hz = 10000000,
     };
 
-    /* ---- 2. IMU-B SPI 配置 ---- */
+    /* ---- 2. IMU-B SPI 配置 (共用总线, 不同 CS) ---- */
     icm42688_spi_cfg_t spi_cfg_b = {
-        .spi_host       = SPI_HOST_B,
-        .pin_sclk       = PIN_SCLK_B,
-        .pin_mosi       = PIN_MOSI_B,
-        .pin_miso       = PIN_MISO_B,
-        .pin_cs         = PIN_CS_B,
-        .pin_int        = PIN_INT_B,  /* 中断引脚 */
+        .spi_host       = SPI_HOST,  /* 同一 SPI 主机 */
+        .pin_sclk       = PIN_SCLK,  /* 共享引脚 */
+        .pin_mosi       = PIN_MOSI,
+        .pin_miso       = PIN_MISO,
+        .pin_cs         = PIN_CS_B,  /* 不同 CS */
+        .pin_int        = PIN_INT_B,
         .clock_speed_hz = 10000000,
     };
 
@@ -199,22 +189,23 @@ void app_main(void)
     net_time_sync_init();
     ESP_LOGI(TAG, "ESP-NOW + 时间同步就绪 (node_id=0x%02X)", NODE_ID);
 
-    /* ---- 8. 主循环 ---- */
+    /* ---- 8. 主循环 (1000Hz 采样, 10帧聚合 → 100Hz 发送) ---- */
     dual_imu_result_t result;
-    int64_t last_output = esp_timer_get_time();
-    const int64_t output_interval_us = 1000000 / OUTPUT_HZ;
     uint32_t pkt_count = 0;
+    uint32_t send_count = 0;
 
-    ESP_LOGI(TAG, "=== 开始双路融合解算 (%dHz, 中断驱动) ===", OUTPUT_HZ);
+    /* 聚合缓冲: 攒满 10 帧再发一次 */
+    net_aggregated_packet_t agg_pkt = {
+        .magic = {'I', 'M', 'U', 'A'},
+        .node_id = NODE_ID,
+    };
+
+    ESP_LOGI(TAG, "=== 开始双路融合解算 (1000Hz采样, 100Hz聚合发送) ===");
 
     while (1) {
-        /* ---- 优化A: 中断驱动等待 Data Ready ----
-         * 优先等待 IMU-A 的 INT1 中断 (高优先级任务阻塞)
-         * 超时 2ms 保护: 防止中断丢失时任务卡死
-         */
+        /* ---- 中断驱动等待 Data Ready ---- */
         icm42688_err_t drdy_err = icm42688_wait_drdy(&imu_a, 2);
         if (drdy_err == ICM42688_ERR_TIMEOUT) {
-            /* 中断超时, 可能 INT 引脚未连接, 降级为短暂延时 */
             vTaskDelay(pdMS_TO_TICKS(1));
         }
 
@@ -225,37 +216,43 @@ void app_main(void)
             continue;
         }
 
-        /* 控制上报频率 */
-        int64_t now = esp_timer_get_time();
-        if ((now - last_output) >= output_interval_us) {
-            last_output = now;
+        /* ---- 聚合: 每帧数据存入缓冲 ---- */
+        int slot = agg_pkt.frame_count;
+        if (slot < NET_AGGREGATE_FRAMES) {
+            net_frame_t *f = &agg_pkt.frames[slot];
+            f->accel[0] = result.accel.x;
+            f->accel[1] = result.accel.y;
+            f->accel[2] = result.accel.z;
+            f->gyro[0]  = result.gyro.x;
+            f->gyro[1]  = result.gyro.y;
+            f->gyro[2]  = result.gyro.z;
+            f->quat[0]  = result.quat.w;
+            f->quat[1]  = result.quat.x;
+            f->quat[2]  = result.quat.y;
+            f->quat[3]  = result.quat.z;
+            f->euler[0] = result.euler.roll;
+            f->euler[1] = result.euler.pitch;
+            f->euler[2] = result.euler.yaw;
+            f->temp     = result.temperature;
+            f->timestamp_us = (uint64_t)net_get_synced_time();
+            agg_pkt.frame_count = slot + 1;
+        }
 
-            /* 构建 ESP-NOW 发送数据包 (使用全局同步时间戳) */
-            net_imu_packet_t pkt = {
-                .accel = {result.accel.x, result.accel.y, result.accel.z},
-                .gyro  = {result.gyro.x,  result.gyro.y,  result.gyro.z},
-                .temp  = result.temperature,
-                .quat  = {result.quat.w, result.quat.x, result.quat.y, result.quat.z},
-                .euler = {result.euler.roll, result.euler.pitch, result.euler.yaw},
-                .timestamp_us = (uint64_t)net_get_synced_time(),  /* 全局同步时间 */
-            };
+        /* ---- 攒满 10 帧 (10ms) → 聚合发送 ---- */
+        if (agg_pkt.frame_count >= NET_AGGREGATE_FRAMES) {
+            bool send_ok = net_udp_send_aggregated(&agg_pkt);
+            agg_pkt.frame_count = 0;  /* 重置缓冲 */
+            send_count++;
 
-            /* ESP-NOW 广播发送 */
-            bool send_ok = net_udp_send_imu(&pkt);
-
-            pkt_count++;
-
-            /* 每 20 包打印一次详细信息 */
-            if (pkt_count % 20 == 0) {
+            if (send_count % 10 == 0) {
                 ESP_LOGI(TAG, "[%lu] R=%5.1f° P=%5.1f° Y=%6.1f° | "
-                         "Conf=%.0f%% | ΔA=%.3fg ΔG=%.1fdps | %s",
-                         (unsigned long)pkt_count,
+                         "Conf=%.0f%% | %s | TX:%lu",
+                         (unsigned long)send_count,
                          result.euler.roll, result.euler.pitch, result.euler.yaw,
                          result.confidence * 100.0f,
-                         result.accel_diff, result.gyro_diff,
-                         send_ok ? "TX✓" : "TX✗");
+                         send_ok ? "TX✓" : "TX✗",
+                         (unsigned long)net_espnow_get_send_ok());
 
-                /* 显示两路 IMU 在线状态 + 中断计数 */
                 const char *sta = dual_dev.imu[0].online ? "ON" : "OFF";
                 const char *stb = dual_dev.imu[1].online ? "ON" : "OFF";
                 ESP_LOGI(TAG, "  IMU-A: %s (IRQ:%lu) | IMU-B: %s (IRQ:%lu) | Sync:%s #%lu",
@@ -266,6 +263,6 @@ void app_main(void)
             }
         }
 
-        /* 不再需要 vTaskDelay — 中断驱动, CPU 在等待信号量时自动让出 */
+        pkt_count++;
     }
 }

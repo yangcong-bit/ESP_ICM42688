@@ -180,6 +180,22 @@ bool net_time_sync_valid(void);
  */
 uint32_t net_time_sync_count(void);
 
+/* ============================================================
+ *  API — 聚合发送
+ * ============================================================ */
+
+/**
+ * @brief 设置本节点 ID (发送时写入聚合包头)
+ */
+void net_set_node_id(uint8_t id);
+
+/**
+ * @brief 发送聚合 IMU 数据包 (10帧合1)
+ * @param agg 聚合包指针
+ * @return true 发送成功
+ */
+bool net_udp_send_aggregated(const net_aggregated_packet_t *agg);
+
 #ifdef __cplusplus
 }
 #endif

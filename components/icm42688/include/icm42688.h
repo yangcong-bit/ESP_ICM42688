@@ -86,6 +86,8 @@ typedef struct {
     int                  int_gpio;    /* 中断引脚号, -1 = 未配置 */
     SemaphoreHandle_t    int_sem;     /* Data Ready 二值信号量 */
     volatile uint32_t    int_count;   /* 中断触发计数 (诊断用) */
+    uint8_t             *dma_tx_buf;  /* 预分配 DMA TX 缓冲 (init时分配) */
+    uint8_t             *dma_rx_buf;  /* 预分配 DMA RX 缓冲 (init时分配) */
     bool                 initialized;
 } icm42688_dev_t;
 

@@ -16,6 +16,13 @@
 
 static const char *TAG = "icm42688";
 
+/* DMA 缓冲大小 (1 byte cmd + 14 bytes data = 15, 对齐到 32) */
+#define DMA_BUF_SIZE  32
+
+/* SPI 总线初始化跟踪 (每个 host 只初始化一次) */
+#define SPI_HOST_MAX  3
+static bool s_spi_bus_inited[SPI_HOST_MAX] = {false};
+
 /* ============================================================
  *  内部辅助
  * ============================================================ */
@@ -49,37 +56,31 @@ static icm42688_err_t spi_read_reg(icm42688_dev_t *dev, uint8_t reg, uint8_t *va
     return (ret == ESP_OK) ? ICM42688_OK : ICM42688_ERR_CONFIG;
 }
 
-/* burst read: 发送 reg 地址, 连续接收 len 字节 */
+/* burst read: 发送 reg 地址, 连续接收 len 字节
+ * 复用 dev 预分配的 DMA 缓冲, 零 malloc
+ */
 static icm42688_err_t spi_read_burst(icm42688_dev_t *dev,
                                       uint8_t reg, uint8_t *buf, size_t len)
 {
+    if (!dev->dma_tx_buf || !dev->dma_rx_buf) return ICM42688_ERR_CONFIG;
+
     uint8_t cmd = reg | ICM42688_SPI_READ;
     size_t total = len + 1;
+    if (total > DMA_BUF_SIZE) return ICM42688_ERR_CONFIG;  /* 防溢出 */
 
-    /* ESP-IDF SPI 全双工要求 TX/RX 缓冲区等长 */
-    uint8_t *txbuf = (uint8_t *)heap_caps_malloc(total, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
-    uint8_t *rxbuf = (uint8_t *)heap_caps_malloc(total, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
-    if (!txbuf || !rxbuf) {
-        heap_caps_free(txbuf);
-        heap_caps_free(rxbuf);
-        return ICM42688_ERR_CONFIG;
-    }
-
-    /* 第一字节: 寄存器地址 (带读标志), 后续填 0 (don't care) */
-    txbuf[0] = cmd;
-    memset(txbuf + 1, 0, len);
+    /* 第一字节: 寄存器地址 (带读标志), 后续填 0 */
+    dev->dma_tx_buf[0] = cmd;
+    memset(dev->dma_tx_buf + 1, 0, len);
 
     spi_transaction_t t = {
         .length    = total * 8,
-        .tx_buffer = txbuf,
-        .rx_buffer = rxbuf,
+        .tx_buffer = dev->dma_tx_buf,
+        .rx_buffer = dev->dma_rx_buf,
     };
     esp_err_t ret = spi_device_polling_transmit(dev->spi_dev, &t);
     if (ret == ESP_OK) {
-        memcpy(buf, rxbuf + 1, len);  /* 跳过第一字节 (dummy) */
+        memcpy(buf, dev->dma_rx_buf + 1, len);  /* 跳过第一字节 (dummy) */
     }
-    heap_caps_free(txbuf);
-    heap_caps_free(rxbuf);
     return (ret == ESP_OK) ? ICM42688_OK : ICM42688_ERR_CONFIG;
 }
 
@@ -156,6 +157,16 @@ icm42688_err_t icm42688_init(icm42688_dev_t *dev,
 
     memset(dev, 0, sizeof(*dev));
 
+    /* ---- 预分配 DMA 缓冲 (生命周期 = dev) ---- */
+    dev->dma_tx_buf = (uint8_t *)heap_caps_malloc(DMA_BUF_SIZE, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+    dev->dma_rx_buf = (uint8_t *)heap_caps_malloc(DMA_BUF_SIZE, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+    if (!dev->dma_tx_buf || !dev->dma_rx_buf) {
+        ESP_LOGE(TAG, "DMA buffer alloc failed");
+        heap_caps_free(dev->dma_tx_buf);
+        heap_caps_free(dev->dma_rx_buf);
+        return ICM42688_ERR_SPI_INIT;
+    }
+
     /* ---- 默认传感器配置 ---- */
     icm42688_cfg_t def_cfg = {
         .accel_fs    = ICM42688_ACCEL_4G,
@@ -169,19 +180,24 @@ icm42688_err_t icm42688_init(icm42688_dev_t *dev,
     }
     dev->cfg = def_cfg;
 
-    /* ---- SPI 总线初始化 ---- */
-    spi_bus_config_t bus_cfg = {
-        .mosi_io_num   = spi_cfg->pin_mosi,
-        .miso_io_num   = spi_cfg->pin_miso,
-        .sclk_io_num   = spi_cfg->pin_sclk,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-        .max_transfer_sz = 64,
-    };
-    esp_err_t ret = spi_bus_initialize(spi_cfg->spi_host, &bus_cfg, SPI_DMA_CH_AUTO);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "SPI bus init failed: %s", esp_err_to_name(ret));
-        return ICM42688_ERR_SPI_INIT;
+    /* ---- SPI 总线初始化 (仅首次, 共享总线场景) ---- */
+    int host_idx = spi_cfg->spi_host;
+    if (host_idx >= 0 && host_idx < SPI_HOST_MAX && !s_spi_bus_inited[host_idx]) {
+        spi_bus_config_t bus_cfg = {
+            .mosi_io_num   = spi_cfg->pin_mosi,
+            .miso_io_num   = spi_cfg->pin_miso,
+            .sclk_io_num   = spi_cfg->pin_sclk,
+            .quadwp_io_num = -1,
+            .quadhd_io_num = -1,
+            .max_transfer_sz = 64,
+        };
+        esp_err_t ret = spi_bus_initialize(spi_cfg->spi_host, &bus_cfg, SPI_DMA_CH_AUTO);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "SPI bus init failed: %s", esp_err_to_name(ret));
+            return ICM42688_ERR_SPI_INIT;
+        }
+        s_spi_bus_inited[host_idx] = true;
+        ESP_LOGI(TAG, "SPI%d bus initialized (shared)", spi_cfg->spi_host);
     }
 
     spi_device_interface_config_t dev_cfg = {
@@ -284,6 +300,11 @@ void icm42688_deinit(icm42688_dev_t *dev)
     /* 进入 standby */
     spi_write_reg(dev, ICM42688_REG_PWR_MGMT0, 0x00);
     spi_bus_remove_device(dev->spi_dev);
+    /* 释放 DMA 缓冲 */
+    heap_caps_free(dev->dma_tx_buf);
+    heap_caps_free(dev->dma_rx_buf);
+    dev->dma_tx_buf = NULL;
+    dev->dma_rx_buf = NULL;
     dev->initialized = false;
 }
 
