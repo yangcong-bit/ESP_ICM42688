@@ -174,9 +174,18 @@ icm42688_err_t dual_imu_update(dual_imu_dev_t *dev,
 {
     if (!dev || !dev->initialized || !result) return ICM42688_ERR_NOT_INIT;
 
-    /* ---- 1. 同时读取两路 IMU ---- */
-    icm42688_err_t err_a = icm42688_read_polling(dev->imu[0].dev, &dev->imu[0].reading);
-    icm42688_err_t err_b = icm42688_read_polling(dev->imu[1].dev, &dev->imu[1].reading);
+    /* ---- 1. 双路 SPI 真正并发: queue_trans(A+B) → wait(A) → wait(B) ---- */
+    icm42688_err_t err_a = icm42688_queue_read(dev->imu[0].dev);
+    icm42688_err_t err_b = icm42688_queue_read(dev->imu[1].dev);
+    /* 此时 SPI2 和 SPI3 在硬件层面同时传输, CPU 不阻塞 */
+    /* 收割 A 的 DMA 结果 */
+    if (err_a == ICM42688_OK) {
+        err_a = icm42688_wait_read(dev->imu[0].dev, &dev->imu[0].reading);
+    }
+    /* 收割 B 的 DMA 结果 */
+    if (err_b == ICM42688_OK) {
+        err_b = icm42688_wait_read(dev->imu[1].dev, &dev->imu[1].reading);
+    }
 
     /* 检测在线状态 */
     if (err_a == ICM42688_OK) {

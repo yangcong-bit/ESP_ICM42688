@@ -39,7 +39,7 @@ static const uint8_t s_broadcast_mac[ESP_NOW_ETH_ALEN] = {
  *  异步发送队列 (消除回调中 esp_now_send + 主循环阻塞)
  * ============================================================ */
 #define SYNC_REPLY_QUEUE_SIZE   4
-#define IMU_SEND_QUEUE_SIZE     4
+#define IMU_SEND_QUEUE_SIZE     40  /* 200ms 抗干扰缓冲池 (200Hz × 0.2s) */
 
 typedef struct {
     uint8_t  dest_mac[ESP_NOW_ETH_ALEN];

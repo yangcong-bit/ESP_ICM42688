@@ -144,6 +144,19 @@ void icm42688_deinit(icm42688_dev_t *dev);
 icm42688_err_t icm42688_read_polling(icm42688_dev_t *dev,
                                      icm42688_reading_t *reading);
 
+/**
+ * @brief 异步提交 SPI DMA 传输 (非阻塞)
+ * 配合 icm42688_wait_read 完成双路 SPI 真正并发:
+ *   queue_trans(A) → queue_trans(B) → get_result(A) → get_result(B)
+ */
+icm42688_err_t icm42688_queue_read(icm42688_dev_t *dev);
+
+/**
+ * @brief 等待并收割之前提交的 SPI DMA 传输结果
+ */
+icm42688_err_t icm42688_wait_read(icm42688_dev_t *dev,
+                                    icm42688_reading_t *reading);
+
 /* ============================================================
  *  API — 中断驱动读取
  * ============================================================ */

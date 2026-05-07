@@ -57,7 +57,6 @@ static icm42688_err_t spi_read_reg(icm42688_dev_t *dev, uint8_t reg, uint8_t *va
 }
 
 /* burst read: 发送 reg 地址, 连续接收 len 字节
- * 使用 queue_trans 异步 DMA, 支持双路 SPI 硬件并发
  * 复用 dev 预分配的 DMA 缓冲, 零 malloc
  */
 static icm42688_err_t spi_read_burst(icm42688_dev_t *dev,
@@ -77,12 +76,39 @@ static icm42688_err_t spi_read_burst(icm42688_dev_t *dev,
         .tx_buffer = dev->dma_tx_buf,
         .rx_buffer = dev->dma_rx_buf,
     };
-    /* 异步提交: queue_trans 非阻塞, 两路 SPI 可硬件并行 */
     esp_err_t ret = spi_device_queue_trans(dev->spi_dev, &t, portMAX_DELAY);
     if (ret != ESP_OK) return ICM42688_ERR_CONFIG;
-    /* 等待完成: 此时两根 SPI 总线可能在同时传输 */
     spi_transaction_t *ret_trans = NULL;
     ret = spi_device_get_trans_result(dev->spi_dev, &ret_trans, portMAX_DELAY);
+    if (ret == ESP_OK) {
+        memcpy(buf, dev->dma_rx_buf + 1, len);
+    }
+    return (ret == ESP_OK) ? ICM42688_OK : ICM42688_ERR_CONFIG;
+}
+
+/* 异步提交 SPI DMA 传输 (非阻塞, 仅提交不等结果) */
+static icm42688_err_t spi_queue_burst(icm42688_dev_t *dev, uint8_t reg, size_t len)
+{
+    if (!dev->dma_tx_buf || !dev->dma_rx_buf) return ICM42688_ERR_CONFIG;
+    uint8_t cmd = reg | ICM42688_SPI_READ;
+    size_t total = len + 1;
+    if (total > DMA_BUF_SIZE) return ICM42688_ERR_CONFIG;
+    dev->dma_tx_buf[0] = cmd;
+    memset(dev->dma_tx_buf + 1, 0, len);
+    spi_transaction_t t = {
+        .length    = total * 8,
+        .tx_buffer = dev->dma_tx_buf,
+        .rx_buffer = dev->dma_rx_buf,
+    };
+    return spi_device_queue_trans(dev->spi_dev, &t, portMAX_DELAY) == ESP_OK
+           ? ICM42688_OK : ICM42688_ERR_CONFIG;
+}
+
+/* 等待并收割之前提交的 SPI DMA 结果 */
+static icm42688_err_t spi_collect_burst(icm42688_dev_t *dev, uint8_t *buf, size_t len)
+{
+    spi_transaction_t *ret_trans = NULL;
+    esp_err_t ret = spi_device_get_trans_result(dev->spi_dev, &ret_trans, portMAX_DELAY);
     if (ret == ESP_OK) {
         memcpy(buf, dev->dma_rx_buf + 1, len);
     }
@@ -140,6 +166,42 @@ icm42688_err_t icm42688_read_regs(icm42688_dev_t *dev,
 {
     if (!dev || !dev->initialized) return ICM42688_ERR_NOT_INIT;
     return spi_read_burst(dev, reg, buf, len);
+}
+
+/* 异步提交: 仅启动 DMA, 不等结果 */
+icm42688_err_t icm42688_queue_read(icm42688_dev_t *dev)
+{
+    if (!dev || !dev->initialized) return ICM42688_ERR_NOT_INIT;
+    return spi_queue_burst(dev, ICM42688_REG_TEMP_DATA1, 14);
+}
+
+/* 收割: 等待 DMA 完成, 解析数据 */
+icm42688_err_t icm42688_wait_read(icm42688_dev_t *dev,
+                                    icm42688_reading_t *reading)
+{
+    if (!dev || !dev->initialized || !reading) return ICM42688_ERR_NOT_INIT;
+    uint8_t buf[14];
+    icm42688_err_t err = spi_collect_burst(dev, buf, sizeof(buf));
+    if (err != ICM42688_OK) return err;
+    /* 解析数据 */
+    int16_t raw_temp = (int16_t)((buf[0] << 8) | buf[1]);
+    reading->temp_raw = (float)raw_temp * 0.00253f + 25.0f;
+    reading->accel_raw.x = (int16_t)((buf[2]  << 8) | buf[3]);
+    reading->accel_raw.y = (int16_t)((buf[4]  << 8) | buf[5]);
+    reading->accel_raw.z = (int16_t)((buf[6]  << 8) | buf[7]);
+    float accel_sens = icm42688_accel_fs_to_sensitivity(dev->cfg.accel_fs);
+    reading->accel_g.x = reading->accel_raw.x / accel_sens - dev->accel_bias.x;
+    reading->accel_g.y = reading->accel_raw.y / accel_sens - dev->accel_bias.y;
+    reading->accel_g.z = reading->accel_raw.z / accel_sens - dev->accel_bias.z;
+    reading->gyro_raw.x = (int16_t)((buf[8]  << 8) | buf[9]);
+    reading->gyro_raw.y = (int16_t)((buf[10] << 8) | buf[11]);
+    reading->gyro_raw.z = (int16_t)((buf[12] << 8) | buf[13]);
+    float gyro_sens = icm42688_gyro_fs_to_sensitivity(dev->cfg.gyro_fs);
+    reading->gyro_dps.x = reading->gyro_raw.x / gyro_sens - dev->gyro_bias.x;
+    reading->gyro_dps.y = reading->gyro_raw.y / gyro_sens - dev->gyro_bias.y;
+    reading->gyro_dps.z = reading->gyro_raw.z / gyro_sens - dev->gyro_bias.z;
+    reading->timestamp_us = esp_timer_get_time();
+    return ICM42688_OK;
 }
 
 /* ============================================================

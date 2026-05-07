@@ -90,6 +90,74 @@ static uint8_t s_node_id = 0;
 /* ============================================================
  *  app_main
  * ============================================================ */
+/* ============================================================
+ *  IMU 采集任务 (优先级 15, Core 1, 绝对最高路权)
+ *  底层无线发送不能打断传感器读取
+ * ============================================================ */
+static void imu_task(void *arg)
+{
+    dual_imu_dev_t *dual_dev = (dual_imu_dev_t *)arg;
+    dual_imu_result_t result;
+
+    ESP_LOGI(TAG, "imu_task 启动 (Core1, 优先级 15)");
+
+    while (1) {
+        /* 严格双硬件中断同步等待 Data Ready */
+        icm42688_err_t drdy_a = icm42688_wait_drdy(&dual_dev->imu[0].dev[0], 2);
+        icm42688_err_t drdy_b = icm42688_wait_drdy(&dual_dev->imu[1].dev[0], 2);
+        if (drdy_a == ICM42688_ERR_TIMEOUT && drdy_b == ICM42688_ERR_TIMEOUT) {
+            vTaskDelay(pdMS_TO_TICKS(1));
+            continue;
+        }
+
+        /* 双路同步读取 + 融合 */
+        icm42688_err_t err = dual_imu_update(dual_dev, &result);
+        if (err != ICM42688_OK) {
+            vTaskDelay(pdMS_TO_TICKS(1));
+            continue;
+        }
+
+        /* 聚合: 每帧数据存入缓冲 */
+        {
+            static uint32_t agg_count = 0;
+            static net_aggregated_packet_t agg_pkt = {
+                .magic = {'I', 'M', 'U', 'A'},
+            };
+            agg_pkt.node_id = s_node_id;
+
+            int slot = agg_pkt.frame_count;
+            if (slot < NET_AGGREGATE_FRAMES) {
+                net_frame_t *f = &agg_pkt.frames[slot];
+                f->accel[0] = result.accel.x;
+                f->accel[1] = result.accel.y;
+                f->accel[2] = result.accel.z;
+                f->gyro[0]  = result.gyro.x;
+                f->gyro[1]  = result.gyro.y;
+                f->gyro[2]  = result.gyro.z;
+                f->quat[0]  = result.quat.w;
+                f->quat[1]  = result.quat.x;
+                f->quat[2]  = result.quat.y;
+                f->quat[3]  = result.quat.z;
+                f->timestamp_us = (uint64_t)net_get_synced_time();
+                agg_pkt.frame_count = slot + 1;
+            }
+
+            /* 攒满 5 帧 → 异步队列投递 (非阻塞) */
+            if (agg_pkt.frame_count >= NET_AGGREGATE_FRAMES) {
+                net_udp_send_aggregated(&agg_pkt);
+                agg_pkt.frame_count = 0;
+                agg_count++;
+                if (agg_count % 200 == 0) {
+                    ESP_LOGI(TAG, "TX #%lu QW:%.3f TX_OK:%lu",
+                             (unsigned long)agg_count,
+                             result.quat.w,
+                             (unsigned long)net_espnow_get_send_ok());
+                }
+            }
+        }
+    }
+}
+
 void app_main(void)
 {
     ESP_LOGI(TAG, "=== 双 ICM-42688-P + ESP-NOW ===");
@@ -221,64 +289,12 @@ void app_main(void)
     ESP_LOGI(TAG, "ESP-NOW 就绪 (MAC:%02X:%02X:%02X:%02X:%02X:%02X → node_id=0x%02X)",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], s_node_id);
 
-    /* ---- 8. 主循环 ---- */
-    dual_imu_result_t result;
+    /* ---- 8. 创建高优先级 IMU 采集任务 (Core1, 优先级15) ---- */
+    xTaskCreatePinnedToCore(imu_task, "imu_task", 8192, &dual_dev, 15, NULL, 1);
+    ESP_LOGI(TAG, "imu_task 已创建 (Core1, 优先级15, 栈8KB)");
 
-    ESP_LOGI(TAG, "=== 极速四元数模式 (1000Hz采样, 5帧聚合→200Hz发送) ===");
-
+    /* app_main 释放 CPU, 不再占用 */
     while (1) {
-        /* 严格双硬件中断同步等待 Data Ready */
-        icm42688_err_t drdy_a = icm42688_wait_drdy(&imu_a, 2);
-        icm42688_err_t drdy_b = icm42688_wait_drdy(&imu_b, 2);
-        if (drdy_a == ICM42688_ERR_TIMEOUT && drdy_b == ICM42688_ERR_TIMEOUT) {
-            vTaskDelay(pdMS_TO_TICKS(1));
-            continue;
-        }
-
-        /* 双路同步读取 + 融合 */
-        err = dual_imu_update(&dual_dev, &result);
-        if (err != ICM42688_OK) {
-            vTaskDelay(pdMS_TO_TICKS(1));
-            continue;
-        }
-
-        /* 聚合: 每帧数据存入缓冲 */
-        {
-            static uint32_t agg_count = 0;
-            static net_aggregated_packet_t agg_pkt = {
-                .magic = {'I', 'M', 'U', 'A'},
-            };
-            agg_pkt.node_id = s_node_id;
-
-            int slot = agg_pkt.frame_count;
-            if (slot < NET_AGGREGATE_FRAMES) {
-                net_frame_t *f = &agg_pkt.frames[slot];
-                f->accel[0] = result.accel.x;
-                f->accel[1] = result.accel.y;
-                f->accel[2] = result.accel.z;
-                f->gyro[0]  = result.gyro.x;
-                f->gyro[1]  = result.gyro.y;
-                f->gyro[2]  = result.gyro.z;
-                f->quat[0]  = result.quat.w;
-                f->quat[1]  = result.quat.x;
-                f->quat[2]  = result.quat.y;
-                f->quat[3]  = result.quat.z;
-                f->timestamp_us = (uint64_t)net_get_synced_time();
-                agg_pkt.frame_count = slot + 1;
-            }
-
-            /* 攒满 5 帧 → 异步队列投递 (非阻塞) */
-            if (agg_pkt.frame_count >= NET_AGGREGATE_FRAMES) {
-                net_udp_send_aggregated(&agg_pkt);
-                agg_pkt.frame_count = 0;
-                agg_count++;
-                if (agg_count % 200 == 0) {
-                    ESP_LOGI(TAG, "TX #%lu QW:%.3f TX_OK:%lu",
-                             (unsigned long)agg_count,
-                             result.quat.w,
-                             (unsigned long)net_espnow_get_send_ok());
-                }
-            }
-        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }

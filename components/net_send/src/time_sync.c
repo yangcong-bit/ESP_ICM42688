@@ -100,7 +100,11 @@ int64_t time_sync_get_time(const time_sync_state_t *state)
 {
     int64_t local_us = esp_timer_get_time();
     if (state && state->synchronized) {
-        return local_us + state->offset_us;
+        /* 64位原子读取: ESP32-S3 是 32位架构, 读取 int64_t 需临界区防止高低位撕裂 */
+        portENTER_CRITICAL(&state->offset_mux);
+        int64_t offset = state->offset_us;
+        portEXIT_CRITICAL(&state->offset_mux);
+        return local_us + offset;
     }
     return local_us;  /* 未同步, 返回本地时间 */
 }
