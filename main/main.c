@@ -258,9 +258,15 @@ void app_main(void)
 
 #if CONFIG_IMU_MOCK_MODE
     ESP_LOGW(TAG, "*** MOCK MODE: 正弦波模拟数据, 验证 ESKF/聚合/发送链路 ***");
+    /* 确保 ESKF 初始四元数为单位四元数 [1,0,0,0] */
+    dual_dev.eskf_state_fused.q[0] = 1.0f;
+    dual_dev.eskf_state_fused.q[1] = 0.0f;
+    dual_dev.eskf_state_fused.q[2] = 0.0f;
+    dual_dev.eskf_state_fused.q[3] = 0.0f;
 #endif
 
-    uint32_t mock_tick = 0;  /* Mock 模式: 模拟时间计数 */
+    uint32_t mock_tick = 0;
+    int log_div = 0;  /* 限流打印计数器 */
 
     while (1) {
 #if !CONFIG_IMU_MOCK_MODE
@@ -286,9 +292,16 @@ void app_main(void)
 
             /* 加速度: 1g 重力分量在 XY 平面随时间缓慢转动 */
             float gravity_angle = t * 0.5f;  /* 0.5 rad/s 旋转 */
-            result.accel.x = sinf(gravity_angle) * 1.0f;  /* X轴: sin */
-            result.accel.y = cosf(gravity_angle) * 1.0f;  /* Y轴: cos */
-            result.accel.z = 0.1f;  /* Z轴: 微小偏置 */
+            float ax = sinf(gravity_angle);
+            float ay = cosf(gravity_angle);
+            float az = 0.1f;
+
+            /* NaN 保护: 确保加速度向量归一化后有效 */
+            float a_norm = sqrtf(ax*ax + ay*ay + az*az);
+            if (a_norm < 0.01f) { ax = 0.0f; ay = 0.0f; az = 1.0f; a_norm = 1.0f; }
+            result.accel.x = ax / a_norm;
+            result.accel.y = ay / a_norm;
+            result.accel.z = az / a_norm;
 
             /* 陀螺仪: Z轴 50dps 旋转 + X轴 10dps 小幅漂移 */
             result.gyro.x = 10.0f + 2.0f * sinf(t * 0.3f);  /* X: 10dps + 漂移 */
@@ -312,6 +325,19 @@ void app_main(void)
                 result.quat.x = dual_dev.eskf_state_fused.q[1];
                 result.quat.y = dual_dev.eskf_state_fused.q[2];
                 result.quat.z = dual_dev.eskf_state_fused.q[3];
+
+                /* 四元数 NaN 保护: 如果结果异常则重置为单位四元数 */
+                float qn = result.quat.w*result.quat.w + result.quat.x*result.quat.x
+                         + result.quat.y*result.quat.y + result.quat.z*result.quat.z;
+                if (isnan(qn) || qn < 0.5f || qn > 2.0f) {
+                    ESP_LOGW(TAG, "Mock: ESKF 四元数异常 (qn=%.4f), 重置", qn);
+                    dual_dev.eskf_state_fused.q[0] = 1.0f;
+                    dual_dev.eskf_state_fused.q[1] = 0.0f;
+                    dual_dev.eskf_state_fused.q[2] = 0.0f;
+                    dual_dev.eskf_state_fused.q[3] = 0.0f;
+                    result.quat = (quat_t){1, 0, 0, 0};
+                }
+
                 result.confidence = 1.0f;
                 result.accel_diff = 0.0f;
                 result.gyro_diff = 0.0f;
@@ -366,8 +392,18 @@ void app_main(void)
 
         pkt_count++;
 
+        /* ---- 限流日志: Mock 模式每 100 次 (~10Hz) 打印一次解算状态 ---- */
 #if CONFIG_IMU_MOCK_MODE
-        vTaskDelay(pdMS_TO_TICKS(1));  /* 维持 1000Hz 节奏 */
+        if (++log_div >= 100) {
+            ESP_LOGI(TAG, "[MOCK] Quat: W:%.3f X:%.3f Y:%.3f Z:%.3f | TX_Cnt:%lu | T:%.1fs",
+                     result.quat.w, result.quat.x, result.quat.y, result.quat.z,
+                     (unsigned long)net_espnow_get_send_ok(),
+                     mock_tick * 0.001f);
+            log_div = 0;
+        }
 #endif
+
+        /* ---- 强制让出 CPU 给 IDLE 任务 (防止 Task WDT) ---- */
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
