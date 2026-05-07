@@ -391,26 +391,31 @@ void app_main(void)
             f->quat[1]  = result.quat.x;
             f->quat[2]  = result.quat.y;
             f->quat[3]  = result.quat.z;
-            f->timestamp_us = (uint64_t)net_get_synced_time();
+            f->timestamp_us = (uint64_t)esp_timer_get_time();
             agg_pkt.frame_count = slot + 1;
         }
 
-        /* ---- 攒满 5 帧 → 聚合发送 ---- */
+        /* ---- 攒满 5 帧 → 聚合处理 ---- */
         if (agg_pkt.frame_count >= NET_AGGREGATE_FRAMES) {
 #if !CONFIG_IMU_MOCK_MODE
-            bool send_ok = net_udp_send_aggregated(&agg_pkt);
-#else
-            bool send_ok = true;  /* Mock: 跳过实际发送 */
-#endif
-            agg_pkt.frame_count = 0;
+            /* 硬件模式: 真实 ESP-NOW 发送 */
+            net_udp_send_aggregated(&agg_pkt);
             send_count++;
 
-            if (send_count % 5 == 0) {  /* Mock: 每 5 包打印一次 */
-                ESP_LOGI(TAG, "[MOCK] #%lu QW:%.3f QX:%.3f QY:%.3f QZ:%.3f | TX:%lu",
+            if (send_count % 20 == 0) {
+                ESP_LOGI(TAG, "TX #%lu QW:%.3f TX_OK:%lu",
                          (unsigned long)send_count,
-                         result.quat.w, result.quat.x, result.quat.y, result.quat.z,
+                         result.quat.w,
                          (unsigned long)net_espnow_get_send_ok());
             }
+#else
+            /* Mock 模式: 仅打印, 绝不调用任何网络 API */
+            send_count++;
+            ESP_LOGI(TAG, "[MOCK] #%lu QW:%.3f QX:%.3f QY:%.3f QZ:%.3f",
+                     (unsigned long)send_count,
+                     result.quat.w, result.quat.x, result.quat.y, result.quat.z);
+#endif
+            agg_pkt.frame_count = 0;  /* 清空缓冲 */
         }
 
         pkt_count++;
