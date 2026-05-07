@@ -199,8 +199,10 @@ void app_main(void)
     imu_a.initialized = true;
     imu_b.initialized = true;
     ESP_LOGI(TAG, "Mock: 虚拟 IMU-A/B 已就绪, 跳过校准");
+    esp_task_wdt_add(NULL);
 #endif
 
+#if !CONFIG_IMU_MOCK_MODE
     dual_imu_cfg_t dual_cfg = {
         .alpha             = FUSION_ALPHA,
         .kp                = 1.0f,
@@ -220,13 +222,34 @@ void app_main(void)
         return;
     }
 
-    /* 执行交叉校准 (自动检测安装偏差) */
     err = dual_imu_calibrate(&dual_dev, 500);
     if (err != ICM42688_OK) {
         ESP_LOGW(TAG, "Cross calibration failed, continuing");
     }
+#else
+    /* ---- MOCK MODE: 手动构造 dual_dev, 不触碰任何 SPI/GPIO ---- */
+    dual_imu_dev_t dual_dev;
+    memset(&dual_dev, 0, sizeof(dual_dev));
+    dual_dev.imu[0].dev = &imu_a;
+    dual_dev.imu[0].online = true;
+    dual_dev.imu[1].dev = &imu_b;
+    dual_dev.imu[1].online = true;
+    dual_dev.initialized = true;
+    dual_dev.fused_count = 0;
+
+    /* ESKF 初始化: 单位四元数 + 对角协方差 */
+    eskf_init(&dual_dev.eskf_fused, &dual_dev.eskf_state_fused);
+    dual_dev.eskf_state_fused.q[0] = 1.0f;
+    memset(dual_dev.eskf_fused.P, 0, sizeof(dual_dev.eskf_fused.P));
+    for (int i = 0; i < 6; i++) {
+        dual_dev.eskf_fused.P[i][i] = 0.001f;
+    }
+    dual_dev.last_update_us = esp_timer_get_time();
+    ESP_LOGI(TAG, "Mock: dual_dev + ESKF 手动初始化完成 Q=[1,0,0,0]");
+#endif
 
     /* ---- 7. 初始化 ESP-NOW 广播 + 时间同步 ---- */
+#if !CONFIG_IMU_MOCK_MODE
     ESP_LOGI(TAG, "初始化 ESP-NOW 广播 (无需路由器)");
     if (!net_wifi_init(NULL)) {
         ESP_LOGE(TAG, "ESP-NOW WiFi init 失败, 仅串口输出");
@@ -238,11 +261,16 @@ void app_main(void)
     /* 动态 MAC 衍生 Node ID: 取 MAC 末字节, 保证 12 节点唯一 */
     uint8_t mac[6];
     esp_wifi_get_mac(WIFI_IF_STA, mac);
-    s_node_id = mac[5];  /* MAC 最后一字节作为 Node ID */
+    s_node_id = mac[5];
     net_set_node_id(s_node_id);
     net_time_sync_init();
     ESP_LOGI(TAG, "ESP-NOW 就绪 (MAC:%02X:%02X:%02X:%02X:%02X:%02X → node_id=0x%02X)",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], s_node_id);
+#else
+    /* MOCK MODE: 跳过 WiFi/NVS, 仅本地验证算法链路 */
+    s_node_id = 0xFF;
+    ESP_LOGW(TAG, "Mock: 跳过 WiFi/NVS 初始化, 仅本地验证 ESKF 链路");
+#endif
 
     /* ---- 8. 主循环 (1000Hz 采样, 5帧聚合 → 200Hz 发送) ---- */
     dual_imu_result_t result;
@@ -255,27 +283,21 @@ void app_main(void)
         .node_id = s_node_id,
     };
 
-    ESP_LOGI(TAG, "=== 极速四元数模式 (1000Hz采样, 5帧聚合→200Hz发送) ===");
+    ESP_LOGI(TAG, "=== 极速四元数模式 ===");
 
 #if CONFIG_IMU_MOCK_MODE
-    ESP_LOGW(TAG, "Mock 模式: 跳过硬件校准, 手动注入 ESKF 初始值...");
-    /* 四元数: 单位四元数 [1,0,0,0] */
-    dual_dev.eskf_state_fused.q[0] = 1.0f;
-    dual_dev.eskf_state_fused.q[1] = 0.0f;
-    dual_dev.eskf_state_fused.q[2] = 0.0f;
-    dual_dev.eskf_state_fused.q[3] = 0.0f;
-    /* 协方差矩阵 P: 清零后设对角线为 0.001, 防奇异 */
-    memset(dual_dev.eskf_fused.P, 0, sizeof(dual_dev.eskf_fused.P));
-    for (int i = 0; i < 6; i++) {
-        dual_dev.eskf_fused.P[i][i] = 0.001f;
-    }
-    ESP_LOGI(TAG, "Mock: ESKF 初始状态 Q=[1,0,0,0] P_diag=0.001");
+    ESP_LOGW(TAG, "*** MOCK MODE: 纯软件验证 ESKF/聚合/发送链路 ***");
 #endif
 
     uint32_t mock_tick = 0;
     int log_div = 0;  /* 限流打印计数器 */
 
     while (1) {
+        /* ---- 心跳: 每 500 帧打印一次, 确认任务存活 ---- */
+        if (pkt_count % 500 == 0) {
+            ESP_LOGI(TAG, "Heartbeat pkt=%lu mock_tick=%lu", (unsigned long)pkt_count, (unsigned long)mock_tick);
+        }
+
 #if !CONFIG_IMU_MOCK_MODE
         /* ---- 严格双硬件中断同步等待 Data Ready ---- */
         icm42688_err_t drdy_a = icm42688_wait_drdy(&imu_a, 2);
@@ -373,43 +395,28 @@ void app_main(void)
             agg_pkt.frame_count = slot + 1;
         }
 
-        /* ---- 攒满 10 帧 (10ms) → 聚合发送 ---- */
+        /* ---- 攒满 5 帧 → 聚合发送 ---- */
         if (agg_pkt.frame_count >= NET_AGGREGATE_FRAMES) {
+#if !CONFIG_IMU_MOCK_MODE
             bool send_ok = net_udp_send_aggregated(&agg_pkt);
-            agg_pkt.frame_count = 0;  /* 重置缓冲 */
+#else
+            bool send_ok = true;  /* Mock: 跳过实际发送 */
+#endif
+            agg_pkt.frame_count = 0;
             send_count++;
 
-            if (send_count % 20 == 0) {
-                ESP_LOGI(TAG, "[%lu] QW=%.4f Conf=%.0f%% | %s | TX:%lu",
+            if (send_count % 5 == 0) {  /* Mock: 每 5 包打印一次 */
+                ESP_LOGI(TAG, "[MOCK] #%lu QW:%.3f QX:%.3f QY:%.3f QZ:%.3f | TX:%lu",
                          (unsigned long)send_count,
-                         result.quat.w,
-                         result.confidence * 100.0f,
-                         send_ok ? "TX✓" : "TX✗",
+                         result.quat.w, result.quat.x, result.quat.y, result.quat.z,
                          (unsigned long)net_espnow_get_send_ok());
-
-                const char *sta = dual_dev.imu[0].online ? "ON" : "OFF";
-                const char *stb = dual_dev.imu[1].online ? "ON" : "OFF";
-                ESP_LOGI(TAG, "  IMU-A: %s (IRQ:%lu) | IMU-B: %s (IRQ:%lu) | Sync:%s #%lu",
-                         sta, (unsigned long)icm42688_get_int_count(&imu_a),
-                         stb, (unsigned long)icm42688_get_int_count(&imu_b),
-                         net_time_sync_valid() ? "OK" : "WAIT",
-                         (unsigned long)net_time_sync_count());
             }
         }
 
         pkt_count++;
 
-        /* ---- 限流日志: Mock 模式每 100 次 (~10Hz) 打印一次解算状态 ---- */
+        /* ---- WDT 保护 & 降频 ---- */
 #if CONFIG_IMU_MOCK_MODE
-        /* 限流日志: 每 10 次 (~1Hz @100Hz) 打印解算状态 */
-        if (++log_div >= 10) {
-            ESP_LOGI(TAG, "[MOCK] Quat: W:%.3f X:%.3f Y:%.3f Z:%.3f | TX_Cnt:%lu | T:%.1fs",
-                     result.quat.w, result.quat.x, result.quat.y, result.quat.z,
-                     (unsigned long)net_espnow_get_send_ok(),
-                     mock_tick * 0.01f);
-            log_div = 0;
-        }
-        /* Mock 模式降频到 100Hz, 手动喂狗 */
         vTaskDelay(pdMS_TO_TICKS(10));
         esp_task_wdt_reset();
 #else
