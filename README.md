@@ -44,7 +44,7 @@ ESP_ICM42688/
 ├── main/main.c                       # 主程序: LDO→SPI→校准→双中断→融合→聚合
 ├── examples/espnow_receiver/         # 接收端示例
 ├── tools/                            # Python 监控/接收脚本
-├── partitions_8mb.csv                # 自定义分区表
+├── partitions_16mb.csv               # 自定义分区表 (16MB Flash)
 └── sdkconfig.defaults                # 含 IRAM/Flash/PSRAM 优化配置
 ```
 
@@ -198,9 +198,9 @@ sequenceDiagram
 
 | 参数 | 参数值 |
 |------|--------|
-| Flash | 8MB |
-| PSRAM | 16MB (Quad, 80MHz) |
-| 分区表 | partitions_8mb.csv (3MB app + 5MB storage) |
+| Flash | 16MB | N16R8 模组 |
+| PSRAM | 8MB | Octal (八线 OPI, N16R8 模组) |
+| 分区表 | partitions_16mb.csv (6MB app + 12MB storage) |
 | IMU 采样率 | 1000Hz (中断驱动，双路严格同步) |
 | ESP-NOW 发送率 | 200Hz (5帧聚合) |
 | 单包载荷 | 248B < 250B 上限 |

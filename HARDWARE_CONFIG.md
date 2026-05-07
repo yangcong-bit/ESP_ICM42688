@@ -1,15 +1,17 @@
 # ESP32-S3 硬件配置说明
 
 ## 当前硬件规格
-- **Flash**: 8MB
-- **PSRAM**: 16MB
+- **Flash**: 16MB
+- **PSRAM**: 8MB (Octal)
+
+> ⚠️ N16R8 模组必须使用 Octal (八线 OPI) 模式，否则会触发 quad_psram 初始化失败。
 
 ## 已修改的配置
 
 ### 1. Flash 大小 (sdkconfig)
 ```ini
-CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
-CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 ```
 
 ### 2. PSRAM 配置 (sdkconfig)
@@ -23,13 +25,13 @@ CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
 ```
 
-### 3. 分区表 (partitions_8mb.csv)
+### 3. 分区表 (partitions_16mb.csv)
 | 分区 | 类型 | 大小 | 说明 |
 |------|------|------|------|
 | nvs | data | 24KB | 非易失性存储 |
 | phy_init | data | 4KB | PHY 初始化数据 |
-| factory | app | 3MB | 应用程序 |
-| storage | data | ~5MB | SPIFFS 文件系统 |
+| factory | app | 6MB | 应用程序 |
+| storage | data | spiffs | 12MB | SPIFFS 文件系统 |
 
 ## 应用配置
 
@@ -50,8 +52,8 @@ idf.py menuconfig
 ```
 然后手动调整:
 - Component config → ESP PSRAM → 启用 PSRAM
-- Serial flasher config → Flash size → 8MB
-- Partition Table → Custom partition table → partitions_8mb.csv
+- Serial flasher config → Flash size → 16MB
+- Partition Table → Custom partition table → partitions_16mb.csv
 
 ## 验证配置
 
@@ -63,7 +65,7 @@ idf.py size
 ### 检查 PSRAM
 烧录后查看串口输出:
 ```
-I (xxx) spiram: Found 16MB PSRAM
+I (xxx) spiram: Found 8MB Octal PSRAM
 ```
 
 ## 注意事项
@@ -86,7 +88,7 @@ I (xxx) spiram: Found 16MB PSRAM
 ## 常见问题
 
 ### Q: PSRAM 容量显示不正确?
-A: 16MB 容量的 PSRAM 物理上为八线，请务必检查是否已正确开启 CONFIG_SPIRAM_MODE_OCT=y，切勿使用 Quad 模式。
+A: N16R8 的 PSRAM 为 8MB Octal (八线)。请务必检查是否已正确开启 CONFIG_SPIRAM_MODE_OCT=y，切勿使用 Quad 模式，否则会触发 quad_psram 初始化失败。
 
 ### Q: Flash 烧录失败?
 A: 确认使用正确的 Flash 大小参数:
