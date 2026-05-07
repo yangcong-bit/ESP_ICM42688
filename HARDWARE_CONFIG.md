@@ -15,7 +15,7 @@ CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
 ### 2. PSRAM 配置 (sdkconfig)
 ```ini
 CONFIG_SPIRAM=y
-CONFIG_SPIRAM_MODE_QUAD=y          # Quad 模式
+CONFIG_SPIRAM_MODE_OCT=y           # Octal 模式 (八线 OPI)
 CONFIG_SPIRAM_SPEED_80M=y          # 80MHz 频率
 CONFIG_SPIRAM_BOOT_INIT=y          # 启动时初始化
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
@@ -86,7 +86,7 @@ I (xxx) spiram: Found 16MB PSRAM
 ## 常见问题
 
 ### Q: PSRAM 容量显示不正确?
-A: 检查 PSRAM 型号是否支持 Quad 模式, 或尝试禁用 `CONFIG_SPIRAM_MODE_OCT`
+A: 16MB 容量的 PSRAM 物理上为八线，请务必检查是否已正确开启 CONFIG_SPIRAM_MODE_OCT=y，切勿使用 Quad 模式。
 
 ### Q: Flash 烧录失败?
 A: 确认使用正确的 Flash 大小参数:

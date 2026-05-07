@@ -96,8 +96,8 @@ flowchart TB
     end
 
     AGG -->|"ESP-NOW 广播 200Hz"| BC{{"ESP-NOW 广播"}}
-    BC --> R1["接收端1 ESP32"]
-    BC --> R2["接收端2 RK3566"]
+    BC --> R1["接收端1 ESP32S3"]
+    BC --> R2["接收端2 ESP32P4"]
     BC --> RN["接收端N PC"]
 ```
 
@@ -149,8 +149,8 @@ ICM42688-B INT1 → GPIO38 → ISR → ┘
 
 ```mermaid
 sequenceDiagram
-    participant H as 主机 (RK3566)
-    participant N as 节点 (ESP32)
+    participant H as 主机 (ESP32P4)
+    participant N as 节点 (ESP32S3)
     H->>N: SYNC_START (T_host_send)
     Note over N: 记录 T_node_rx
     N->>H: SYNC_REPLY (T_node_rx)
