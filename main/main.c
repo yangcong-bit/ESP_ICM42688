@@ -43,6 +43,7 @@
 #include "net_send.h"
 #include "time_sync.h"
 #include "esp_wifi.h"
+#include "esp_task_wdt.h"
 
 static const char *TAG = "main";
 
@@ -257,12 +258,18 @@ void app_main(void)
     ESP_LOGI(TAG, "=== 极速四元数模式 (1000Hz采样, 5帧聚合→200Hz发送) ===");
 
 #if CONFIG_IMU_MOCK_MODE
-    ESP_LOGW(TAG, "*** MOCK MODE: 正弦波模拟数据, 验证 ESKF/聚合/发送链路 ***");
-    /* 确保 ESKF 初始四元数为单位四元数 [1,0,0,0] */
+    ESP_LOGW(TAG, "Mock 模式: 跳过硬件校准, 手动注入 ESKF 初始值...");
+    /* 四元数: 单位四元数 [1,0,0,0] */
     dual_dev.eskf_state_fused.q[0] = 1.0f;
     dual_dev.eskf_state_fused.q[1] = 0.0f;
     dual_dev.eskf_state_fused.q[2] = 0.0f;
     dual_dev.eskf_state_fused.q[3] = 0.0f;
+    /* 协方差矩阵 P: 清零后设对角线为 0.001, 防奇异 */
+    memset(dual_dev.eskf_fused.P, 0, sizeof(dual_dev.eskf_fused.P));
+    for (int i = 0; i < 6; i++) {
+        dual_dev.eskf_fused.P[i][i] = 0.001f;
+    }
+    ESP_LOGI(TAG, "Mock: ESKF 初始状态 Q=[1,0,0,0] P_diag=0.001");
 #endif
 
     uint32_t mock_tick = 0;
@@ -288,7 +295,7 @@ void app_main(void)
 #else
         /* ---- MOCK MODE: 生成模拟 3D 运动数据 ---- */
         {
-            float t = mock_tick * 0.001f;  /* 时间 (秒), 1kHz */
+            float t = mock_tick * 0.01f;  /* 时间 (秒), 100Hz 降频 */
 
             /* 加速度: 1g 重力分量在 XY 平面随时间缓慢转动 */
             float gravity_angle = t * 0.5f;  /* 0.5 rad/s 旋转 */
@@ -317,7 +324,7 @@ void app_main(void)
                 };
                 float accel_g[3] = { result.accel.x, result.accel.y, result.accel.z };
 
-                eskf_predict(&dual_dev.eskf_fused, &dual_dev.eskf_state_fused, gyro_rads, 0.001f);
+                eskf_predict(&dual_dev.eskf_fused, &dual_dev.eskf_state_fused, gyro_rads, 0.01f);
                 eskf_update_accel(&dual_dev.eskf_fused, &dual_dev.eskf_state_fused, accel_g);
 
                 /* 从 ESKF 提取四元数 */
@@ -394,16 +401,19 @@ void app_main(void)
 
         /* ---- 限流日志: Mock 模式每 100 次 (~10Hz) 打印一次解算状态 ---- */
 #if CONFIG_IMU_MOCK_MODE
-        if (++log_div >= 100) {
+        /* 限流日志: 每 10 次 (~1Hz @100Hz) 打印解算状态 */
+        if (++log_div >= 10) {
             ESP_LOGI(TAG, "[MOCK] Quat: W:%.3f X:%.3f Y:%.3f Z:%.3f | TX_Cnt:%lu | T:%.1fs",
                      result.quat.w, result.quat.x, result.quat.y, result.quat.z,
                      (unsigned long)net_espnow_get_send_ok(),
-                     mock_tick * 0.001f);
+                     mock_tick * 0.01f);
             log_div = 0;
         }
-#endif
-
-        /* ---- 强制让出 CPU 给 IDLE 任务 (防止 Task WDT) ---- */
+        /* Mock 模式降频到 100Hz, 手动喂狗 */
+        vTaskDelay(pdMS_TO_TICKS(10));
+        esp_task_wdt_reset();
+#else
         vTaskDelay(pdMS_TO_TICKS(1));
+#endif
     }
 }
