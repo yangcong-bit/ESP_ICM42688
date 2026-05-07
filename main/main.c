@@ -221,30 +221,19 @@ void app_main(void)
     ESP_LOGI(TAG, "ESP-NOW 就绪 (MAC:%02X:%02X:%02X:%02X:%02X:%02X → node_id=0x%02X)",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], s_node_id);
 
-    /* ---- 8. 主循环 (1000Hz 采样, 5帧聚合 → 200Hz 发送) ---- */
+    /* ---- 8. 主循环 ---- */
     dual_imu_result_t result;
-    uint32_t pkt_count = 0;
-    uint32_t send_count = 0;
-
-    /* 聚合缓冲: 攒满 5 帧 (5ms) 再发一次, 248B < 250B ESP-NOW 上限 */
-    net_aggregated_packet_t agg_pkt = {
-        .magic = {'I', 'M', 'U', 'A'},
-        .node_id = s_node_id,
-    };
 
     ESP_LOGI(TAG, "=== 极速四元数模式 (1000Hz采样, 5帧聚合→200Hz发送) ===");
 
     while (1) {
-        /* ---- 严格双硬件中断同步等待 Data Ready ---- */
+        /* 严格双硬件中断同步等待 Data Ready */
         icm42688_err_t drdy_a = icm42688_wait_drdy(&imu_a, 2);
         icm42688_err_t drdy_b = icm42688_wait_drdy(&imu_b, 2);
-
         if (drdy_a == ICM42688_ERR_TIMEOUT && drdy_b == ICM42688_ERR_TIMEOUT) {
-            /* 两路均未就绪 (可能总线或电源异常), 延时防死锁 */
             vTaskDelay(pdMS_TO_TICKS(1));
             continue;
         }
-        /* 只要有一路触发, 就进入读取与融合 */
 
         /* 双路同步读取 + 融合 */
         err = dual_imu_update(&dual_dev, &result);
@@ -252,10 +241,8 @@ void app_main(void)
             vTaskDelay(pdMS_TO_TICKS(1));
             continue;
         }
-#endif
 
-#if !CONFIG_IMU_MOCK_MODE
-        /* ---- 聚合: 每帧数据存入缓冲 ---- */
+        /* 聚合: 每帧数据存入缓冲 */
         {
             static uint32_t agg_count = 0;
             static net_aggregated_packet_t agg_pkt = {
@@ -293,6 +280,5 @@ void app_main(void)
                 }
             }
         }
-#endif
     }
 }
