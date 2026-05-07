@@ -94,9 +94,11 @@ void eskf_predict(eskf_t *eskf, eskf_nominal_state_t *nominal, const float gyro[
 
 // 测量步：利用加速度计校准 Pitch 和 Roll (利用序贯更新，斩断矩阵求逆)
 void eskf_update_accel(eskf_t *eskf, eskf_nominal_state_t *nominal, const float accel[3]) {
-    // 归一化加速度测量值
+    // 终极保护: NaN 检测 + 量程上限
+    if (isnan(accel[0]) || isnan(accel[1]) || isnan(accel[2])) return;
     float a_norm = sqrtf(accel[0]*accel[0] + accel[1]*accel[1] + accel[2]*accel[2]);
     if (a_norm < 0.1f) return; // 自由落体保护
+    if (a_norm > 16.0f) return; // 超量程冲击保护: 放弃本次更新, 纯靠陀螺仪积分硬扛
     float inv_a = 1.0f / a_norm;
     float z[3] = {accel[0]*inv_a, accel[1]*inv_a, accel[2]*inv_a};
 

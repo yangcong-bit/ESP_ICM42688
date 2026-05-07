@@ -252,49 +252,47 @@ void app_main(void)
             vTaskDelay(pdMS_TO_TICKS(1));
             continue;
         }
+#endif
 
+#if !CONFIG_IMU_MOCK_MODE
         /* ---- 聚合: 每帧数据存入缓冲 ---- */
-        int slot = agg_pkt.frame_count;
-        if (slot < NET_AGGREGATE_FRAMES) {
-            net_frame_t *f = &agg_pkt.frames[slot];
-            f->accel[0] = result.accel.x;
-            f->accel[1] = result.accel.y;
-            f->accel[2] = result.accel.z;
-            f->gyro[0]  = result.gyro.x;
-            f->gyro[1]  = result.gyro.y;
-            f->gyro[2]  = result.gyro.z;
-            f->quat[0]  = result.quat.w;
-            f->quat[1]  = result.quat.x;
-            f->quat[2]  = result.quat.y;
-            f->quat[3]  = result.quat.z;
-            f->timestamp_us = (uint64_t)net_get_synced_time();
-            agg_pkt.frame_count = slot + 1;
-        }
+        {
+            static uint32_t agg_count = 0;
+            static net_aggregated_packet_t agg_pkt = {
+                .magic = {'I', 'M', 'U', 'A'},
+            };
+            agg_pkt.node_id = s_node_id;
 
-        /* ---- 攒满 10 帧 (10ms) → 聚合发送 ---- */
-        if (agg_pkt.frame_count >= NET_AGGREGATE_FRAMES) {
-            bool send_ok = net_udp_send_aggregated(&agg_pkt);
-            agg_pkt.frame_count = 0;  /* 重置缓冲 */
-            send_count++;
+            int slot = agg_pkt.frame_count;
+            if (slot < NET_AGGREGATE_FRAMES) {
+                net_frame_t *f = &agg_pkt.frames[slot];
+                f->accel[0] = result.accel.x;
+                f->accel[1] = result.accel.y;
+                f->accel[2] = result.accel.z;
+                f->gyro[0]  = result.gyro.x;
+                f->gyro[1]  = result.gyro.y;
+                f->gyro[2]  = result.gyro.z;
+                f->quat[0]  = result.quat.w;
+                f->quat[1]  = result.quat.x;
+                f->quat[2]  = result.quat.y;
+                f->quat[3]  = result.quat.z;
+                f->timestamp_us = (uint64_t)net_get_synced_time();
+                agg_pkt.frame_count = slot + 1;
+            }
 
-            if (send_count % 20 == 0) {
-                ESP_LOGI(TAG, "[%lu] QW=%.4f Conf=%.0f%% | %s | TX:%lu",
-                         (unsigned long)send_count,
-                         result.quat.w,
-                         result.confidence * 100.0f,
-                         send_ok ? "TX✓" : "TX✗",
-                         (unsigned long)net_espnow_get_send_ok());
-
-                const char *sta = dual_dev.imu[0].online ? "ON" : "OFF";
-                const char *stb = dual_dev.imu[1].online ? "ON" : "OFF";
-                ESP_LOGI(TAG, "  IMU-A: %s (IRQ:%lu) | IMU-B: %s (IRQ:%lu) | Sync:%s #%lu",
-                         sta, (unsigned long)icm42688_get_int_count(&imu_a),
-                         stb, (unsigned long)icm42688_get_int_count(&imu_b),
-                         net_time_sync_valid() ? "OK" : "WAIT",
-                         (unsigned long)net_time_sync_count());
+            /* 攒满 5 帧 → 异步队列投递 (非阻塞) */
+            if (agg_pkt.frame_count >= NET_AGGREGATE_FRAMES) {
+                net_udp_send_aggregated(&agg_pkt);
+                agg_pkt.frame_count = 0;
+                agg_count++;
+                if (agg_count % 200 == 0) {
+                    ESP_LOGI(TAG, "TX #%lu QW:%.3f TX_OK:%lu",
+                             (unsigned long)agg_count,
+                             result.quat.w,
+                             (unsigned long)net_espnow_get_send_ok());
+                }
             }
         }
-
-        pkt_count++;
+#endif
     }
 }
