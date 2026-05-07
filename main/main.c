@@ -43,7 +43,6 @@
 #include "net_send.h"
 #include "time_sync.h"
 #include "esp_wifi.h"
-#include "esp_task_wdt.h"
 
 static const char *TAG = "main";
 
@@ -199,7 +198,6 @@ void app_main(void)
     imu_a.initialized = true;
     imu_b.initialized = true;
     ESP_LOGI(TAG, "Mock: 虚拟 IMU-A/B 已就绪, 跳过校准");
-    esp_task_wdt_add(NULL);
 #endif
 
 #if !CONFIG_IMU_MOCK_MODE
@@ -272,160 +270,65 @@ void app_main(void)
     ESP_LOGW(TAG, "Mock: 跳过 WiFi/NVS 初始化, 仅本地验证 ESKF 链路");
 #endif
 
-    /* ---- 8. 主循环 (1000Hz 采样, 5帧聚合 → 200Hz 发送) ---- */
+    /* ---- 8. 主循环 ---- */
     dual_imu_result_t result;
-    uint32_t pkt_count = 0;
-    uint32_t send_count = 0;
+    memset(&result, 0, sizeof(result));
 
-    /* 聚合缓冲: 攒满 5 帧 (5ms) 再发一次, 248B < 250B ESP-NOW 上限 */
-    net_aggregated_packet_t agg_pkt = {
-        .magic = {'I', 'M', 'U', 'A'},
-        .node_id = s_node_id,
-    };
+    ESP_LOGW("TRACER", "app_main: 所有初始化完成, 即将进入主循环");
 
     ESP_LOGI(TAG, "=== 极速四元数模式 ===");
 
 #if CONFIG_IMU_MOCK_MODE
-    ESP_LOGW(TAG, "*** MOCK MODE: 纯软件验证 ESKF/聚合/发送链路 ***");
+    ESP_LOGW(TAG, "*** MOCK MODE: 纯软件验证 ESKF 链路 (零驱动调用) ***");
 #endif
 
-    uint32_t mock_tick = 0;
-    int log_div = 0;  /* 限流打印计数器 */
+    ESP_LOGW("TRACER", "准备进入 while(1) 主循环...");
 
     while (1) {
-        /* ---- 心跳: 每 500 帧打印一次, 确认任务存活 ---- */
-        if (pkt_count % 500 == 0) {
-            ESP_LOGI(TAG, "Heartbeat pkt=%lu mock_tick=%lu", (unsigned long)pkt_count, (unsigned long)mock_tick);
-        }
+#if CONFIG_IMU_MOCK_MODE
+        ESP_LOGW("TRACER", "=== 循环起点 ===");
 
-#if !CONFIG_IMU_MOCK_MODE
-        /* ---- 严格双硬件中断同步等待 Data Ready ---- */
+        /* 1. 模拟数据生成 (纯数学, 无任何驱动调用) */
+        float t = esp_timer_get_time() / 1000000.0f;
+        float gyro_rads[3] = { 0.1f, 0.0f, 0.5f };
+        float accel_g[3] = { sinf(t), cosf(t), 1.0f };
+        ESP_LOGW("TRACER", "Mock 数据生成完毕 t=%.3f", t);
+
+        /* 2. 预测步骤 */
+        ESP_LOGW("TRACER", "准备调用 eskf_predict...");
+        eskf_predict(&dual_dev.eskf_fused, &dual_dev.eskf_state_fused, gyro_rads, 0.01f);
+        ESP_LOGW("TRACER", "eskf_predict 执行完毕");
+
+        /* 3. 更新步骤 */
+        ESP_LOGW("TRACER", "准备调用 eskf_update_accel...");
+        eskf_update_accel(&dual_dev.eskf_fused, &dual_dev.eskf_state_fused, accel_g);
+        ESP_LOGW("TRACER", "eskf_update_accel 执行完毕");
+
+        /* 4. 读取结果 */
+        ESP_LOGW("TRACER", "四元数: W=%.3f X=%.3f Y=%.3f Z=%.3f",
+                 dual_dev.eskf_state_fused.q[0],
+                 dual_dev.eskf_state_fused.q[1],
+                 dual_dev.eskf_state_fused.q[2],
+                 dual_dev.eskf_state_fused.q[3]);
+
+        /* 5. 收尾延迟 (10ms, 让出 CPU 给 IDLE) */
+        ESP_LOGW("TRACER", "准备 vTaskDelay(10ms)...");
+        vTaskDelay(pdMS_TO_TICKS(10));
+        ESP_LOGW("TRACER", "=== 循环终点 (Delay 结束) ===");
+
+#else
+        /* ---- 真实硬件模式 ---- */
         icm42688_err_t drdy_a = icm42688_wait_drdy(&imu_a, 2);
         icm42688_err_t drdy_b = icm42688_wait_drdy(&imu_b, 2);
-
         if (drdy_a == ICM42688_ERR_TIMEOUT && drdy_b == ICM42688_ERR_TIMEOUT) {
             vTaskDelay(pdMS_TO_TICKS(1));
             continue;
         }
-
-        /* 双路同步读取 + 融合 */
         err = dual_imu_update(&dual_dev, &result);
         if (err != ICM42688_OK) {
             vTaskDelay(pdMS_TO_TICKS(1));
             continue;
         }
-#else
-        /* ---- MOCK MODE: 生成模拟 3D 运动数据 ---- */
-        {
-            float t = mock_tick * 0.01f;  /* 时间 (秒), 100Hz 降频 */
-
-            /* 加速度: 1g 重力分量在 XY 平面随时间缓慢转动 */
-            float gravity_angle = t * 0.5f;  /* 0.5 rad/s 旋转 */
-            float ax = sinf(gravity_angle);
-            float ay = cosf(gravity_angle);
-            float az = 0.1f;
-
-            /* NaN 保护: 确保加速度向量归一化后有效 */
-            float a_norm = sqrtf(ax*ax + ay*ay + az*az);
-            if (a_norm < 0.01f) { ax = 0.0f; ay = 0.0f; az = 1.0f; a_norm = 1.0f; }
-            result.accel.x = ax / a_norm;
-            result.accel.y = ay / a_norm;
-            result.accel.z = az / a_norm;
-
-            /* 陀螺仪: Z轴 50dps 旋转 + X轴 10dps 小幅漂移 */
-            result.gyro.x = 10.0f + 2.0f * sinf(t * 0.3f);  /* X: 10dps + 漂移 */
-            result.gyro.y = 3.0f * cosf(t * 0.7f);          /* Y: 微小摆动 */
-            result.gyro.z = 50.0f;                           /* Z: 恒定 50dps 旋转 */
-
-            /* 直接喂给 ESKF 解算 */
-            {
-                float gyro_rads[3] = {
-                    result.gyro.x * (float)(M_PI / 180.0f),
-                    result.gyro.y * (float)(M_PI / 180.0f),
-                    result.gyro.z * (float)(M_PI / 180.0f)
-                };
-                float accel_g[3] = { result.accel.x, result.accel.y, result.accel.z };
-
-                eskf_predict(&dual_dev.eskf_fused, &dual_dev.eskf_state_fused, gyro_rads, 0.01f);
-                eskf_update_accel(&dual_dev.eskf_fused, &dual_dev.eskf_state_fused, accel_g);
-
-                /* 从 ESKF 提取四元数 */
-                result.quat.w = dual_dev.eskf_state_fused.q[0];
-                result.quat.x = dual_dev.eskf_state_fused.q[1];
-                result.quat.y = dual_dev.eskf_state_fused.q[2];
-                result.quat.z = dual_dev.eskf_state_fused.q[3];
-
-                /* 四元数 NaN 保护: 如果结果异常则重置为单位四元数 */
-                float qn = result.quat.w*result.quat.w + result.quat.x*result.quat.x
-                         + result.quat.y*result.quat.y + result.quat.z*result.quat.z;
-                if (isnan(qn) || qn < 0.5f || qn > 2.0f) {
-                    ESP_LOGW(TAG, "Mock: ESKF 四元数异常 (qn=%.4f), 重置", qn);
-                    dual_dev.eskf_state_fused.q[0] = 1.0f;
-                    dual_dev.eskf_state_fused.q[1] = 0.0f;
-                    dual_dev.eskf_state_fused.q[2] = 0.0f;
-                    dual_dev.eskf_state_fused.q[3] = 0.0f;
-                    result.quat = (quat_t){1, 0, 0, 0};
-                }
-
-                result.confidence = 1.0f;
-                result.accel_diff = 0.0f;
-                result.gyro_diff = 0.0f;
-                result.cross_check_ok = true;
-            }
-
-            mock_tick++;
-        }
-#endif
-
-        /* ---- 聚合: 每帧数据存入缓冲 ---- */
-        int slot = agg_pkt.frame_count;
-        if (slot < NET_AGGREGATE_FRAMES) {
-            net_frame_t *f = &agg_pkt.frames[slot];
-            f->accel[0] = result.accel.x;
-            f->accel[1] = result.accel.y;
-            f->accel[2] = result.accel.z;
-            f->gyro[0]  = result.gyro.x;
-            f->gyro[1]  = result.gyro.y;
-            f->gyro[2]  = result.gyro.z;
-            f->quat[0]  = result.quat.w;
-            f->quat[1]  = result.quat.x;
-            f->quat[2]  = result.quat.y;
-            f->quat[3]  = result.quat.z;
-            f->timestamp_us = (uint64_t)esp_timer_get_time();
-            agg_pkt.frame_count = slot + 1;
-        }
-
-        /* ---- 攒满 5 帧 → 聚合处理 ---- */
-        if (agg_pkt.frame_count >= NET_AGGREGATE_FRAMES) {
-#if !CONFIG_IMU_MOCK_MODE
-            /* 硬件模式: 真实 ESP-NOW 发送 */
-            net_udp_send_aggregated(&agg_pkt);
-            send_count++;
-
-            if (send_count % 20 == 0) {
-                ESP_LOGI(TAG, "TX #%lu QW:%.3f TX_OK:%lu",
-                         (unsigned long)send_count,
-                         result.quat.w,
-                         (unsigned long)net_espnow_get_send_ok());
-            }
-#else
-            /* Mock 模式: 仅打印, 绝不调用任何网络 API */
-            send_count++;
-            ESP_LOGI(TAG, "[MOCK] #%lu QW:%.3f QX:%.3f QY:%.3f QZ:%.3f",
-                     (unsigned long)send_count,
-                     result.quat.w, result.quat.x, result.quat.y, result.quat.z);
-#endif
-            agg_pkt.frame_count = 0;  /* 清空缓冲 */
-        }
-
-        pkt_count++;
-
-        /* ---- WDT 保护 & 降频 ---- */
-#if CONFIG_IMU_MOCK_MODE
-        vTaskDelay(pdMS_TO_TICKS(10));
-        esp_task_wdt_reset();
-#else
-        vTaskDelay(pdMS_TO_TICKS(1));
 #endif
     }
 }
