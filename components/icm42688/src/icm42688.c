@@ -57,6 +57,7 @@ static icm42688_err_t spi_read_reg(icm42688_dev_t *dev, uint8_t reg, uint8_t *va
 }
 
 /* burst read: 发送 reg 地址, 连续接收 len 字节
+ * 使用 queue_trans 异步 DMA, 支持双路 SPI 硬件并发
  * 复用 dev 预分配的 DMA 缓冲, 零 malloc
  */
 static icm42688_err_t spi_read_burst(icm42688_dev_t *dev,
@@ -66,9 +67,8 @@ static icm42688_err_t spi_read_burst(icm42688_dev_t *dev,
 
     uint8_t cmd = reg | ICM42688_SPI_READ;
     size_t total = len + 1;
-    if (total > DMA_BUF_SIZE) return ICM42688_ERR_CONFIG;  /* 防溢出 */
+    if (total > DMA_BUF_SIZE) return ICM42688_ERR_CONFIG;
 
-    /* 第一字节: 寄存器地址 (带读标志), 后续填 0 */
     dev->dma_tx_buf[0] = cmd;
     memset(dev->dma_tx_buf + 1, 0, len);
 
@@ -77,9 +77,14 @@ static icm42688_err_t spi_read_burst(icm42688_dev_t *dev,
         .tx_buffer = dev->dma_tx_buf,
         .rx_buffer = dev->dma_rx_buf,
     };
-    esp_err_t ret = spi_device_polling_transmit(dev->spi_dev, &t);
+    /* 异步提交: queue_trans 非阻塞, 两路 SPI 可硬件并行 */
+    esp_err_t ret = spi_device_queue_trans(dev->spi_dev, &t, portMAX_DELAY);
+    if (ret != ESP_OK) return ICM42688_ERR_CONFIG;
+    /* 等待完成: 此时两根 SPI 总线可能在同时传输 */
+    spi_transaction_t *ret_trans = NULL;
+    ret = spi_device_get_trans_result(dev->spi_dev, &ret_trans, portMAX_DELAY);
     if (ret == ESP_OK) {
-        memcpy(buf, dev->dma_rx_buf + 1, len);  /* 跳过第一字节 (dummy) */
+        memcpy(buf, dev->dma_rx_buf + 1, len);
     }
     return (ret == ESP_OK) ? ICM42688_OK : ICM42688_ERR_CONFIG;
 }

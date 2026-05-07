@@ -22,6 +22,7 @@ void time_sync_init(time_sync_state_t *state)
     memset(state, 0, sizeof(*state));
     state->offset_us = 0;
     state->synchronized = false;
+    portMUX_INITIALIZE(&state->offset_mux);
     ESP_LOGI(TAG, "Time sync module initialized (node side)");
 }
 
@@ -52,7 +53,10 @@ bool time_sync_handle_rx(time_sync_state_t *state,
             return false;
         }
 
+        /* 64位原子写入: ESP32-S3 是 32位架构, int64_t 需要临界区保护 */
+        portENTER_CRITICAL(&state->offset_mux);
         state->offset_us = ts_pkt->offset_us;
+        portEXIT_CRITICAL(&state->offset_mux);
         state->last_sync_seq = ts_pkt->seq;
         state->sync_count++;
         state->synchronized = true;

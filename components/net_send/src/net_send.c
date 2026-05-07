@@ -16,7 +16,6 @@
 #include "nvs_flash.h"
 #include "esp_netif.h"
 #include "esp_event.h"
-#include "esp_event.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -37,25 +36,41 @@ static const uint8_t s_broadcast_mac[ESP_NOW_ETH_ALEN] = {
 };
 
 /* ============================================================
- *  异步回复队列 (Task 3: 消除回调中 esp_now_send)
+ *  异步发送队列 (消除回调中 esp_now_send + 主循环阻塞)
  * ============================================================ */
-#define SYNC_REPLY_QUEUE_SIZE  4
+#define SYNC_REPLY_QUEUE_SIZE   4
+#define IMU_SEND_QUEUE_SIZE     4
+
 typedef struct {
     uint8_t  dest_mac[ESP_NOW_ETH_ALEN];
     uint8_t  payload[sizeof(timesync_packet_t)];
     int      payload_len;
 } sync_reply_item_t;
 
+typedef struct {
+    uint8_t  data[sizeof(net_aggregated_packet_t)];
+    int      data_len;
+} imu_send_item_t;
+
 static QueueHandle_t s_sync_reply_queue = NULL;
+static QueueHandle_t s_imu_send_queue = NULL;
 static TaskHandle_t  s_espnow_task_handle = NULL;
 
-/* ESP-NOW 专用发送任务 (任务级上下文, 非回调) */
+/* ESP-NOW 专用发送任务 (任务级上下文, 非回调, 非主循环) */
 static void espnow_send_task(void *arg)
 {
-    sync_reply_item_t item;
+    sync_reply_item_t reply;
+    imu_send_item_t   imu_pkt;
+
     while (1) {
-        if (xQueueReceive(s_sync_reply_queue, &item, portMAX_DELAY) == pdTRUE) {
-            esp_now_send(item.dest_mac, item.payload, item.payload_len);
+        /* 优先处理时间同步回复 (延迟敏感) */
+        if (xQueueReceive(s_sync_reply_queue, &reply, 0) == pdTRUE) {
+            esp_now_send(reply.dest_mac, reply.payload, reply.payload_len);
+            continue;
+        }
+        /* 其次处理 IMU 聚合数据 (吞吐优先) */
+        if (xQueueReceive(s_imu_send_queue, &imu_pkt, pdMS_TO_TICKS(10)) == pdTRUE) {
+            esp_now_send(s_broadcast_mac, imu_pkt.data, imu_pkt.data_len);
         }
     }
 }
@@ -179,10 +194,11 @@ bool net_udp_init(const net_udp_cfg_t *cfg)
     /* 兼容旧接口, 忽略 UDP 参数, 初始化 ESP-NOW */
     if (s_espnow_init_done) return true;
 
-    /* 初始化异步回复队列 + 发送任务 */
+    /* 初始化异步发送队列 + 发送任务 */
     if (!s_sync_reply_queue) {
         s_sync_reply_queue = xQueueCreate(SYNC_REPLY_QUEUE_SIZE, sizeof(sync_reply_item_t));
-        xTaskCreate(espnow_send_task, "espnow_tx", 2048, NULL, 5, &s_espnow_task_handle);
+        s_imu_send_queue = xQueueCreate(IMU_SEND_QUEUE_SIZE, sizeof(imu_send_item_t));
+        xTaskCreate(espnow_send_task, "espnow_tx", 4096, NULL, 5, &s_espnow_task_handle);
     }
 
     /* 初始化 ESP-NOW */
@@ -280,6 +296,10 @@ void net_deinit(void)
         vQueueDelete(s_sync_reply_queue);
         s_sync_reply_queue = NULL;
     }
+    if (s_imu_send_queue) {
+        vQueueDelete(s_imu_send_queue);
+        s_imu_send_queue = NULL;
+    }
     esp_wifi_stop();
     ESP_LOGI(TAG, "ESP-NOW deinitialized");
 }
@@ -304,10 +324,14 @@ uint32_t net_espnow_get_send_fail(void)
 bool net_udp_send_aggregated(const net_aggregated_packet_t *agg)
 {
     if (!s_espnow_init_done || !agg || agg->frame_count == 0) return false;
-    size_t pkt_size = 8 + agg->frame_count * sizeof(net_frame_t);  /* header(8) + frames */
-    esp_err_t ret = esp_now_send(s_broadcast_mac,
-                                  (const uint8_t *)agg, pkt_size);
-    return (ret == ESP_OK);
+    size_t pkt_size = 8 + agg->frame_count * sizeof(net_frame_t);
+
+    /* 异步队列投递: 非阻塞, 满则丢弃 (由 espnow_send_task 负责实际发送) */
+    imu_send_item_t item;
+    memcpy(item.data, agg, pkt_size);
+    item.data_len = pkt_size;
+    BaseType_t ret = xQueueSend(s_imu_send_queue, &item, 0);
+    return (ret == pdTRUE);
 }
 
 /* ============================================================

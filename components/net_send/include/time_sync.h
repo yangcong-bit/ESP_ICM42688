@@ -16,6 +16,8 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "freertos/FreeRTOS.h"
+#include "portmacro.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -54,7 +56,8 @@ typedef struct __attribute__((packed)) {
  *  节点端 API (传感器节点)
  * ============================================================ */
 typedef struct {
-    int64_t  offset_us;          /* 当前时间偏移 (host - local) */
+    volatile int64_t offset_us;  /* 当前时间偏移 (host - local), 需临界区保护 */
+    portMUX_TYPE    offset_mux;  /* 64位读写自旋锁 */
     uint32_t last_sync_seq;      /* 最后同步的序列号 */
     uint32_t sync_count;         /* 同步次数 */
     bool     synchronized;       /* 是否已同步 */
