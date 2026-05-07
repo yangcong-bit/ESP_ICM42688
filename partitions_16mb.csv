@@ -1,6 +1,5 @@
-# Name,   Type, SubType, Offset,   Size,     Flags
-# ESP32-S3 N16R8 分区表 (16MB Flash)
-nvs,      data, nvs,     0x9000,   0x6000,
-phy_init, data, phy,     0xf000,   0x1000,
-factory,  app,  factory, 0x10000,  0x600000,
-storage,  data, spiffs,  0x610000, 0xBF0000,
+# Name,   Type, SubType, Offset,  Size, Flags
+nvs,      data, nvs,     0x9000,  24K,
+phy_init, data, phy,     0xf000,  4K,
+factory,  app,  factory, 0x10000, 4M,
+storage,  data, spiffs,  ,        11M,

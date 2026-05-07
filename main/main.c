@@ -22,6 +22,13 @@
  *   F. 防死锁异步 ESP-NOW 收发
  */
 
+/* ============================================================
+ *  虚拟数据模式 (Mock Mode)
+ *  置1: 跳过真实 IMU 初始化, 用正弦波模拟数据, 验证 ESKF/聚合/发送链路
+ *  置0: 正常硬件驱动模式
+ * ============================================================ */
+#define CONFIG_IMU_MOCK_MODE  1
+
 #include <stdio.h>
 #include <math.h>
 #include "freertos/FreeRTOS.h"
@@ -32,6 +39,7 @@
 #include "icm42688.h"
 #include "icm42688_alg.h"
 #include "icm42688_dual.h"
+#include "hardcore_eskf.h"
 #include "net_send.h"
 #include "time_sync.h"
 #include "esp_wifi.h"
@@ -47,21 +55,21 @@ static const char *TAG = "main";
 /* ============================================================
  *  IMU-A 引脚 (SPI2)
  * ============================================================ */
-#define PIN_SCLK_A    48
-#define PIN_MOSI_A    47
-#define PIN_MISO_A    21
-#define PIN_CS_A      45
-#define PIN_INT_A     14
+#define PIN_SCLK_A    13
+#define PIN_MOSI_A    12
+#define PIN_MISO_A    11
+#define PIN_CS_A      14
+#define PIN_INT_A     10
 #define SPI_HOST_A    SPI2_HOST
 
 /* ============================================================
  *  IMU-B 引脚 (SPI3)
  * ============================================================ */
-#define PIN_SCLK_B    41
-#define PIN_MOSI_B    40
-#define PIN_MISO_B    39
-#define PIN_CS_B      42
-#define PIN_INT_B     38
+#define PIN_SCLK_B    17
+#define PIN_MOSI_B    16
+#define PIN_MISO_B    15
+#define PIN_CS_B      18
+#define PIN_INT_B     7
 #define SPI_HOST_B    SPI3_HOST
 
 /* 节点 ID: 启动时从 MAC 地址低位自动推演, 无需硬编码 */
@@ -94,12 +102,14 @@ void app_main(void)
 {
     ESP_LOGI(TAG, "=== 双 ICM-42688-P + ESP-NOW ===");
 
+#if CONFIG_IMU_MOCK_MODE
+    ESP_LOGW(TAG, "*** MOCK MODE ENABLED — 无真实 IMU, 使用模拟数据 ***");
+#endif
+
     /* ================================================================
-     *  LDO 强控上电时序 (任务2)
-     *  在任何 SPI/IMU 初始化之前, 先使能 LDO 并等待 50ms,
-     *  确保传感器端电压稳压完成、芯片内部复位彻底结束,
-     *  杜绝错过首个中断沿的隐患。
+     *  LDO 强控上电时序
      * ================================================================ */
+#if !CONFIG_IMU_MOCK_MODE
     gpio_config_t ldo_io = {
         .pin_bit_mask = (1ULL << PIN_LDO_EN1) | (1ULL << PIN_LDO_EN2),
         .mode         = GPIO_MODE_OUTPUT,
@@ -108,12 +118,16 @@ void app_main(void)
         .intr_type    = GPIO_INTR_DISABLE,
     };
     gpio_config(&ldo_io);
-    gpio_set_level(PIN_LDO_EN1, 1);  /* 使能 IMU-A LDO */
-    gpio_set_level(PIN_LDO_EN2, 1);  /* 使能 IMU-B LDO */
+    gpio_set_level(PIN_LDO_EN1, 1);
+    gpio_set_level(PIN_LDO_EN2, 1);
     ESP_LOGI(TAG, "LDO EN1(IO%d) + EN2(IO%d) 拉高, 等待 50ms 稳压...", PIN_LDO_EN1, PIN_LDO_EN2);
     vTaskDelay(pdMS_TO_TICKS(50));
     ESP_LOGI(TAG, "LDO 稳压完成, 开始 SPI 初始化");
+#endif
 
+    icm42688_err_t err;
+
+#if !CONFIG_IMU_MOCK_MODE
     /* ---- 1. IMU-A SPI 配置 (独立 SPI2) ---- */
     icm42688_spi_cfg_t spi_cfg_a = {
         .spi_host       = SPI_HOST_A,
@@ -177,6 +191,14 @@ void app_main(void)
     /* ---- 6. 双 IMU 交叉校准 ---- */
     ESP_LOGI(TAG, "请保持传感器静止, 开始交叉校准...");
     vTaskDelay(pdMS_TO_TICKS(1000));
+#else
+    /* ---- MOCK MODE: 跳过硬件初始化, 手动构造虚拟设备 ---- */
+    icm42688_dev_t imu_a = {0};
+    icm42688_dev_t imu_b = {0};
+    imu_a.initialized = true;
+    imu_b.initialized = true;
+    ESP_LOGI(TAG, "Mock: 虚拟 IMU-A/B 已就绪, 跳过校准");
+#endif
 
     dual_imu_cfg_t dual_cfg = {
         .alpha             = FUSION_ALPHA,
@@ -234,17 +256,22 @@ void app_main(void)
 
     ESP_LOGI(TAG, "=== 极速四元数模式 (1000Hz采样, 5帧聚合→200Hz发送) ===");
 
+#if CONFIG_IMU_MOCK_MODE
+    ESP_LOGW(TAG, "*** MOCK MODE: 正弦波模拟数据, 验证 ESKF/聚合/发送链路 ***");
+#endif
+
+    uint32_t mock_tick = 0;  /* Mock 模式: 模拟时间计数 */
+
     while (1) {
+#if !CONFIG_IMU_MOCK_MODE
         /* ---- 严格双硬件中断同步等待 Data Ready ---- */
         icm42688_err_t drdy_a = icm42688_wait_drdy(&imu_a, 2);
         icm42688_err_t drdy_b = icm42688_wait_drdy(&imu_b, 2);
 
         if (drdy_a == ICM42688_ERR_TIMEOUT && drdy_b == ICM42688_ERR_TIMEOUT) {
-            /* 两路均未就绪 (可能总线或电源异常), 延时防死锁 */
             vTaskDelay(pdMS_TO_TICKS(1));
             continue;
         }
-        /* 只要有一路触发, 就进入读取与融合 */
 
         /* 双路同步读取 + 融合 */
         err = dual_imu_update(&dual_dev, &result);
@@ -252,6 +279,48 @@ void app_main(void)
             vTaskDelay(pdMS_TO_TICKS(1));
             continue;
         }
+#else
+        /* ---- MOCK MODE: 生成模拟 3D 运动数据 ---- */
+        {
+            float t = mock_tick * 0.001f;  /* 时间 (秒), 1kHz */
+
+            /* 加速度: 1g 重力分量在 XY 平面随时间缓慢转动 */
+            float gravity_angle = t * 0.5f;  /* 0.5 rad/s 旋转 */
+            result.accel.x = sinf(gravity_angle) * 1.0f;  /* X轴: sin */
+            result.accel.y = cosf(gravity_angle) * 1.0f;  /* Y轴: cos */
+            result.accel.z = 0.1f;  /* Z轴: 微小偏置 */
+
+            /* 陀螺仪: Z轴 50dps 旋转 + X轴 10dps 小幅漂移 */
+            result.gyro.x = 10.0f + 2.0f * sinf(t * 0.3f);  /* X: 10dps + 漂移 */
+            result.gyro.y = 3.0f * cosf(t * 0.7f);          /* Y: 微小摆动 */
+            result.gyro.z = 50.0f;                           /* Z: 恒定 50dps 旋转 */
+
+            /* 直接喂给 ESKF 解算 */
+            {
+                float gyro_rads[3] = {
+                    result.gyro.x * (float)(M_PI / 180.0f),
+                    result.gyro.y * (float)(M_PI / 180.0f),
+                    result.gyro.z * (float)(M_PI / 180.0f)
+                };
+                float accel_g[3] = { result.accel.x, result.accel.y, result.accel.z };
+
+                eskf_predict(&dual_dev.eskf_fused, &dual_dev.eskf_state_fused, gyro_rads, 0.001f);
+                eskf_update_accel(&dual_dev.eskf_fused, &dual_dev.eskf_state_fused, accel_g);
+
+                /* 从 ESKF 提取四元数 */
+                result.quat.w = dual_dev.eskf_state_fused.q[0];
+                result.quat.x = dual_dev.eskf_state_fused.q[1];
+                result.quat.y = dual_dev.eskf_state_fused.q[2];
+                result.quat.z = dual_dev.eskf_state_fused.q[3];
+                result.confidence = 1.0f;
+                result.accel_diff = 0.0f;
+                result.gyro_diff = 0.0f;
+                result.cross_check_ok = true;
+            }
+
+            mock_tick++;
+        }
+#endif
 
         /* ---- 聚合: 每帧数据存入缓冲 ---- */
         int slot = agg_pkt.frame_count;
@@ -296,5 +365,9 @@ void app_main(void)
         }
 
         pkt_count++;
+
+#if CONFIG_IMU_MOCK_MODE
+        vTaskDelay(pdMS_TO_TICKS(1));  /* 维持 1000Hz 节奏 */
+#endif
     }
 }
