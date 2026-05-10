@@ -34,7 +34,7 @@ void eskf_predict(eskf_t *eskf, eskf_nominal_state_t *nominal, const float gyro[
 
     /* 归一化 (SIMD: dsps_normf_ext) */
     float q_buf[4] = { nominal->q[0], nominal->q[1], nominal->q[2], nominal->q[3] };
-    float qn = dsps_normf_ext(q_buf, 4);
+    float qn = sqrtf(q_buf[0]*q_buf[0] + q_buf[1]*q_buf[1] + q_buf[2]*q_buf[2] + q_buf[3]*q_buf[3]);
     if (qn > 1e-8f) {
         float inv_n = 1.0f / qn;
         nominal->q[0] *= inv_n; nominal->q[1] *= inv_n;
@@ -158,7 +158,7 @@ void eskf_update_accel(eskf_t *eskf, eskf_nominal_state_t *nominal, const float 
 
     /* 归一化 (SIMD) */
     float q_buf[4] = { nominal->q[0], nominal->q[1], nominal->q[2], nominal->q[3] };
-    float qn = dsps_normf_ext(q_buf, 4);
+    float qn = sqrtf(q_buf[0]*q_buf[0] + q_buf[1]*q_buf[1] + q_buf[2]*q_buf[2] + q_buf[3]*q_buf[3]);
     if (qn > 1e-8f) {
         float inv_n = 1.0f / qn;
         nominal->q[0] *= inv_n; nominal->q[1] *= inv_n;
