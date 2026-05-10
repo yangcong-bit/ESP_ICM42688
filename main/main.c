@@ -36,6 +36,7 @@
 #include "time_sync.h"
 #include "esp_wifi.h"
 #include "oled.h"
+#include "battery.h"
 
 static const char *TAG = "main";
 
@@ -107,15 +108,15 @@ static void oled_task(void *arg)
         snprintf(line, sizeof(line), "NID:%02X", s_node_id);
         oled_show_string(0, 0, line);
 
-        /* 第 1 行: IMU 在线状态 */
-        /* (由 imu_task 通过全局变量传递) */
-        snprintf(line, sizeof(line), "TX:%lu",
-                 (unsigned long)net_espnow_get_send_ok());
+        /* 第 1 行: 电池电压 + 电量 */
+        float bat_v = battery_get_voltage();
+        uint8_t bat_pct = battery_get_percentage();
+        snprintf(line, sizeof(line), "B:%.1fV %u%%", bat_v, bat_pct);
         oled_show_string(0, 8, line);
 
-        /* 第 2 行: 同步状态 */
-        snprintf(line, sizeof(line), "Sync:%s",
-                 net_time_sync_valid() ? "OK" : "WAIT");
+        /* 第 2 行: TX 发送计数 */
+        snprintf(line, sizeof(line), "TX:%lu",
+                 (unsigned long)net_espnow_get_send_ok());
         oled_show_string(0, 16, line);
 
         /* 第 3 行: 发送失败统计 */
@@ -224,6 +225,12 @@ void app_main(void)
     oled_err_t oled_err = oled_init();
     if (oled_err != OLED_OK) {
         ESP_LOGW(TAG, "OLED init failed, display disabled");
+    }
+
+    /* ---- 电池 ADC 初始化 ---- */
+    battery_err_t bat_err = battery_init();
+    if (bat_err != BATTERY_OK) {
+        ESP_LOGW(TAG, "Battery ADC init failed");
     }
 
     /* ---- 1. IMU-A SPI 配置 (独立 SPI2) ---- */
