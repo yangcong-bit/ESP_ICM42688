@@ -35,6 +35,7 @@
 #include "net_send.h"
 #include "time_sync.h"
 #include "esp_wifi.h"
+#include "oled.h"
 
 static const char *TAG = "main";
 
@@ -90,6 +91,43 @@ static uint8_t s_node_id = 0;
 /* ============================================================
  *  app_main
  * ============================================================ */
+/* ============================================================
+ *  OLED 显示任务 (优先级 2, 低频刷新, 不阻塞 IMU)
+ * ============================================================ */
+static void oled_task(void *arg)
+{
+    (void)arg;
+    ESP_LOGI(TAG, "oled_task 启动 (优先级 2)");
+
+    char line[16];
+    while (1) {
+        oled_clear();
+
+        /* 第 0 行: Node ID + MAC */
+        snprintf(line, sizeof(line), "NID:%02X", s_node_id);
+        oled_show_string(0, 0, line);
+
+        /* 第 1 行: IMU 在线状态 */
+        /* (由 imu_task 通过全局变量传递) */
+        snprintf(line, sizeof(line), "TX:%lu",
+                 (unsigned long)net_espnow_get_send_ok());
+        oled_show_string(0, 8, line);
+
+        /* 第 2 行: 同步状态 */
+        snprintf(line, sizeof(line), "Sync:%s",
+                 net_time_sync_valid() ? "OK" : "WAIT");
+        oled_show_string(0, 16, line);
+
+        /* 第 3 行: 发送失败统计 */
+        snprintf(line, sizeof(line), "ERR:%lu",
+                 (unsigned long)net_espnow_get_send_fail());
+        oled_show_string(0, 24, line);
+
+        oled_refresh();
+        vTaskDelay(pdMS_TO_TICKS(100));  /* 10Hz 刷新 */
+    }
+}
+
 /* ============================================================
  *  IMU 采集任务 (优先级 15, Core 1, 绝对最高路权)
  *  底层无线发送不能打断传感器读取
@@ -181,6 +219,12 @@ void app_main(void)
     ESP_LOGI(TAG, "LDO EN1(IO%d) + EN2(IO%d) 拉高, 等待 50ms 稳压...", PIN_LDO_EN1, PIN_LDO_EN2);
     vTaskDelay(pdMS_TO_TICKS(50));
     ESP_LOGI(TAG, "LDO 稳压完成, 开始 SPI 初始化");
+
+    /* ---- OLED 初始化 (IO35 电源 + IO36 复位时序) ---- */
+    oled_err_t oled_err = oled_init();
+    if (oled_err != OLED_OK) {
+        ESP_LOGW(TAG, "OLED init failed, display disabled");
+    }
 
     /* ---- 1. IMU-A SPI 配置 (独立 SPI2) ---- */
     icm42688_spi_cfg_t spi_cfg_a = {
@@ -294,8 +338,12 @@ void app_main(void)
     xTaskCreatePinnedToCore(imu_task, "imu_task", 8192, &dual_dev, 15, NULL, 1);
     ESP_LOGI(TAG, "imu_task 已创建 (Core1, 优先级15, 栈8KB)");
 
+    /* 创建 OLED 显示任务 (优先级 2, 低频刷新) */
+    xTaskCreate(oled_task, "oled_task", 4096, NULL, 2, NULL);
+    ESP_LOGI(TAG, "oled_task 已创建 (优先级2, 10Hz 刷新)");
+
     /* app_main 释放 CPU, 不再占用 */
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        // vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
