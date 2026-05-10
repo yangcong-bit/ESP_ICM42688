@@ -26,6 +26,7 @@ static esp_err_t oled_write_cmd(uint8_t cmd)
                                        buf, 2, pdMS_TO_TICKS(100));
 }
 
+__attribute__((unused))
 static esp_err_t oled_write_data(uint8_t data)
 {
     uint8_t buf[2] = { 0x40, data };  /* Co=0, D/C#=1 */
