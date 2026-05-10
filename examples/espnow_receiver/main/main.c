@@ -237,15 +237,3 @@ void app_main(void)
     /* 3. 启动主控调度任务 */
     xTaskCreate(master_ctrl_task, "master_ctrl", 4096, NULL, 5, NULL);
 }
-
-    ESP_LOGI(TAG, "等待接收 IMU 数据包 (sizeof=%d bytes)...", (int)sizeof(imu_packet_t));
-    ESP_LOGI(TAG, "将发送端烧录为主程序, 此端保持监听");
-
-    /* 主循环空闲 (回调处理所有逻辑) */
-    while (1) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
-
-        /* 每秒打印统计 */
-        ESP_LOGI(TAG, "已接收 %lu 包", (unsigned long)s_pkt_count);
-    }
-}

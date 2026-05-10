@@ -16,7 +16,7 @@
 #include "nvs_flash.h"
 #include "esp_netif.h"
 #include "esp_event.h"
-#include "esp_rom/esp_rom_sys.h"
+#include "esp_rom_sys.h"
 #include <string.h>
 #include <stdio.h>
 
