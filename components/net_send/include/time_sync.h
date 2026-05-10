@@ -51,6 +51,7 @@ typedef struct __attribute__((packed)) {
 #define TIMESYNC_REPLY    0x02  /* 节点 → 主机: 回复 */
 #define TIMESYNC_APPLY    0x03  /* 主机 → 广播: 下发 offset */
 #define TIMESYNC_HEARTBEAT 0x04 /* 主机 → 广播: 心跳 (维持同步) */
+#define TIMESYNC_TDMA_CFG  0x05 /* 主机 → 节点: 下发 TDMA 时隙配置 */
 
 /* ============================================================
  *  节点端 API (传感器节点)
@@ -62,6 +63,12 @@ typedef struct {
     uint32_t sync_count;         /* 同步次数 */
     bool     synchronized;       /* 是否已同步 */
     uint64_t last_sync_local_us; /* 上次同步时的本地时间 (用于超时检测) */
+
+    /* === TDMA 微时隙配置 === */
+    bool     tdma_enabled;       /* 是否启用分时发送 */
+    uint32_t tdma_period_us;     /* 发送总周期 (如 5000us = 200Hz) */
+    uint32_t tdma_offset_us;     /* 本节点时隙起始偏移量 */
+    uint32_t tdma_window_us;     /* 允许发送的窗口大小 */
 } time_sync_state_t;
 
 /**
@@ -102,6 +109,20 @@ int64_t time_sync_get_time(time_sync_state_t *state);
  * @brief 同步是否有效 (距上次同步 < 5 秒)
  */
 bool time_sync_is_valid(const time_sync_state_t *state);
+
+/**
+ * @brief 设置 TDMA 时隙参数
+ */
+void time_sync_set_tdma(time_sync_state_t *state, bool enable,
+                         uint32_t period, uint32_t offset, uint32_t window);
+
+/**
+ * @brief 判断当前是否在本节点的 TDMA 时隙内
+ *
+ * 利用全局同步时间取模, 计算当前相位是否落在本节点窗口内。
+ * 未启用或未同步时退化为立即发送。
+ */
+bool time_sync_is_my_slot(time_sync_state_t *state);
 
 /* ============================================================
  *  主机端 API (RK3566/PC, 仅做参考)

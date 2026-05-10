@@ -16,6 +16,7 @@
 #include "nvs_flash.h"
 #include "esp_netif.h"
 #include "esp_event.h"
+#include "esp_rom/esp_rom_sys.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -68,8 +69,12 @@ static void espnow_send_task(void *arg)
             esp_now_send(reply.dest_mac, reply.payload, reply.payload_len);
             continue;
         }
-        /* 其次处理 IMU 聚合数据 (吞吐优先) */
+        /* 其次处理 IMU 聚合数据 (TDMA 时隙控制) */
         if (xQueueReceive(s_imu_send_queue, &imu_pkt, pdMS_TO_TICKS(10)) == pdTRUE) {
+            /* TDMA: 自旋等待直到进入本节点微时隙 */
+            while (!time_sync_is_my_slot(&s_time_sync)) {
+                esp_rom_delay_us(50);  /* 50μs 粒度轮询, 防死锁 */
+            }
             esp_now_send(s_broadcast_mac, imu_pkt.data, imu_pkt.data_len);
         }
     }
@@ -346,6 +351,14 @@ void net_time_sync_init(void)
 void net_set_node_id(uint8_t id)
 {
     s_node_id = id;
+
+    /* TDMA 自动配置: 200Hz → period=5000us, 12节点 → 400us/节点, 保护间隔50us */
+    uint32_t period_us  = 5000;                         /* 发送周期 200Hz */
+    uint32_t slot_us    = period_us / 12;               /* 每节点时隙 400us */
+    uint32_t guard_us   = 50;                           /* 保护间隔 50us */
+    uint32_t window_us  = slot_us - guard_us;           /* 有效窗口 350us */
+    uint32_t offset_us  = (id % 12) * slot_us;          /* 本节点偏移 */
+    time_sync_set_tdma(&s_time_sync, true, period_us, offset_us, window_us);
 }
 
 int64_t net_get_synced_time(void)

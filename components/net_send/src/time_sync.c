@@ -23,6 +23,10 @@ void time_sync_init(time_sync_state_t *state)
     state->offset_us = 0;
     state->synchronized = false;
     portMUX_INITIALIZE(&state->offset_mux);
+    state->tdma_enabled   = false;
+    state->tdma_period_us = 0;
+    state->tdma_offset_us = 0;
+    state->tdma_window_us = 0;
     ESP_LOGI(TAG, "Time sync module initialized (node side)");
 }
 
@@ -107,6 +111,36 @@ int64_t time_sync_get_time(time_sync_state_t *state)
         return local_us + offset;
     }
     return local_us;  /* 未同步, 返回本地时间 */
+}
+
+void time_sync_set_tdma(time_sync_state_t *state, bool enable,
+                         uint32_t period, uint32_t offset, uint32_t window)
+{
+    if (!state) return;
+    state->tdma_enabled   = enable;
+    state->tdma_period_us = period;
+    state->tdma_offset_us = offset;
+    state->tdma_window_us = window;
+    if (enable) {
+        ESP_LOGI(TAG, "TDMA enabled: period=%luus offset=%luus window=%luus",
+                 (unsigned long)period, (unsigned long)offset, (unsigned long)window);
+    }
+}
+
+bool time_sync_is_my_slot(time_sync_state_t *state)
+{
+    if (!state || !state->tdma_enabled || !state->synchronized) {
+        return true;  /* 未启用或未同步, 退化为立即发送 */
+    }
+
+    int64_t now_us = time_sync_get_time(state);
+    uint32_t current_phase = (uint32_t)((uint64_t)now_us % state->tdma_period_us);
+
+    if (current_phase >= state->tdma_offset_us &&
+        current_phase < (state->tdma_offset_us + state->tdma_window_us)) {
+        return true;
+    }
+    return false;
 }
 
 bool time_sync_is_valid(const time_sync_state_t *state)
