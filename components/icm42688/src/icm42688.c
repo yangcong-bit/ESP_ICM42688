@@ -222,6 +222,9 @@ icm42688_err_t icm42688_init(icm42688_dev_t *dev,
 {
     if (!dev || !spi_cfg) return ICM42688_ERR_CONFIG;
 
+    /* 【修改1】将 err 的声明提到函数最前面，确保全函数可用 */
+    icm42688_err_t err = ICM42688_OK;
+
     memset(dev, 0, sizeof(*dev));
 
     /* ---- 预分配 DMA 缓冲 (生命周期 = dev) ---- */
@@ -229,9 +232,9 @@ icm42688_err_t icm42688_init(icm42688_dev_t *dev,
     dev->dma_rx_buf = (uint8_t *)heap_caps_malloc(DMA_BUF_SIZE, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
     if (!dev->dma_tx_buf || !dev->dma_rx_buf) {
         ESP_LOGE(TAG, "DMA buffer alloc failed");
-        heap_caps_free(dev->dma_tx_buf);
-        heap_caps_free(dev->dma_rx_buf);
-        return ICM42688_ERR_SPI_INIT;
+        /* 【修改2】给 err 赋对应的错误码，并统一进入 cleanup */
+        err = ICM42688_ERR_SPI_INIT;
+        goto dma_cleanup;
     }
 
     /* ---- 默认传感器配置 ---- */
@@ -262,6 +265,8 @@ icm42688_err_t icm42688_init(icm42688_dev_t *dev,
         ret = spi_bus_initialize(spi_cfg->spi_host, &bus_cfg, SPI_DMA_CH_AUTO);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "SPI bus init failed: %s", esp_err_to_name(ret));
+            /* 【修改3】赋值后 goto */
+            err = ICM42688_ERR_SPI_INIT;
             goto dma_cleanup;
         }
         s_spi_bus_inited[host_idx] = true;
@@ -277,6 +282,8 @@ icm42688_err_t icm42688_init(icm42688_dev_t *dev,
     ret = spi_bus_add_device(spi_cfg->spi_host, &dev_cfg, &dev->spi_dev);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "SPI add device failed: %s", esp_err_to_name(ret));
+        /* 【修改4】赋值后 goto */
+        err = ICM42688_ERR_SPI_INIT;
         goto dma_cleanup;
     }
 
@@ -286,7 +293,7 @@ icm42688_err_t icm42688_init(icm42688_dev_t *dev,
     dev->int_count = 0;
 
     /* ---- 软复位 ---- */
-    icm42688_err_t err = ICM42688_OK;
+    /* 【修改5】直接使用最上方声明的 err */
     err = icm42688_reset(dev);
     if (err != ICM42688_OK) goto dma_cleanup;
 
@@ -302,7 +309,6 @@ icm42688_err_t icm42688_init(icm42688_dev_t *dev,
     ESP_LOGI(TAG, "WHO_AM_I = 0x%02X ✓", who);
 
     /* ---- 配置传感器 ---- */
-
     /* PWR_MGMT0: 使能 Accel + Gyro (low-noise mode), 保留温度 */
     uint8_t pwr = (ICM42688_MODE_LOWNOISE << 2)  /* Accel = low-noise */
                 | (ICM42688_MODE_LOWNOISE << 0);  /* Gyro  = low-noise */
@@ -341,16 +347,18 @@ icm42688_err_t icm42688_init(icm42688_dev_t *dev,
              (dev->cfg.gyro_fs == ICM42688_GYRO_125DPS)  ? "125dps": "?",
              1000);
 
+    /* 如果顺利执行到这里，直接返回 OK */
     return ICM42688_OK;
 
 dma_cleanup:
-    heap_caps_free(dev->dma_tx_buf);
-    heap_caps_free(dev->dma_rx_buf);
+    /* 【修改6】增加判空，防止分配失败时 free(NULL) 导致不必要的问题 */
+    if (dev->dma_tx_buf) heap_caps_free(dev->dma_tx_buf);
+    if (dev->dma_rx_buf) heap_caps_free(dev->dma_rx_buf);
     dev->dma_tx_buf = NULL;
     dev->dma_rx_buf = NULL;
     return err;
 
-    return ICM42688_OK;
+    /* 【修改7】删除了最底部无法到达的 return ICM42688_OK; */
 }
 
 /* ============================================================
