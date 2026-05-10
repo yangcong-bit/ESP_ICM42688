@@ -18,7 +18,7 @@ void eskf_init(eskf_t *eskf, eskf_nominal_state_t *nominal) {
 }
 
 /* 预测步: P = F * P * F^T + Q (SIMD 加速) */
-void eskf_predict(eskf_t *eskf, eskf_nominal_state_t *nominal, const float gyro[3], float dt) {
+void IRAM_ATTR eskf_predict(eskf_t *eskf, eskf_nominal_state_t *nominal, const float gyro[3], float dt) {
     float wx = gyro[0] - nominal->bg[0];
     float wy = gyro[1] - nominal->bg[1];
     float wz = gyro[2] - nominal->bg[2];
@@ -78,7 +78,7 @@ void eskf_predict(eskf_t *eskf, eskf_nominal_state_t *nominal, const float gyro[
 }
 
 /* 更新步: 序贯更新 (SIMD 加速) */
-void eskf_update_accel(eskf_t *eskf, eskf_nominal_state_t *nominal, const float accel[3]) {
+void IRAM_ATTR eskf_update_accel(eskf_t *eskf, eskf_nominal_state_t *nominal, const float accel[3]) {
     if (isnan(accel[0]) || isnan(accel[1]) || isnan(accel[2])) return;
     float a_norm = sqrtf(accel[0]*accel[0] + accel[1]*accel[1] + accel[2]*accel[2]);
     if (a_norm < 0.1f) return;

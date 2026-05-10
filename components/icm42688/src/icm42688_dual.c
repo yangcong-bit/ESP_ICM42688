@@ -256,7 +256,26 @@ icm42688_err_t dual_imu_update(dual_imu_dev_t *dev,
     }
     result->cross_check_ok = (cross_ok_a && cross_ok_b);
 
-    /* ---- 4. 加权融合 ---- */
+    /* ---- 4. 应用交叉陀螺仪偏置补偿 (在融合前!) ---- */
+    if (dev->cfg.enable_cross_bias && dev->imu[0].online && dev->imu[1].online) {
+        float dt = 1.0f / dev->cfg.sample_hz;
+        float decay = 0.001f;
+        dev->imu[0].gyro_bias_run.x += (gyro_a.x - gyro_b.x) * 0.5f * dt * decay;
+        dev->imu[0].gyro_bias_run.y += (gyro_a.y - gyro_b.y) * 0.5f * dt * decay;
+        dev->imu[0].gyro_bias_run.z += (gyro_a.z - gyro_b.z) * 0.5f * dt * decay;
+        dev->imu[1].gyro_bias_run.x = -dev->imu[0].gyro_bias_run.x;
+        dev->imu[1].gyro_bias_run.y = -dev->imu[0].gyro_bias_run.y;
+        dev->imu[1].gyro_bias_run.z = -dev->imu[0].gyro_bias_run.z;
+        /* 关键: 从原始数据中减去偏置, 再进入融合 */
+        gyro_a.x -= dev->imu[0].gyro_bias_run.x;
+        gyro_a.y -= dev->imu[0].gyro_bias_run.y;
+        gyro_a.z -= dev->imu[0].gyro_bias_run.z;
+        gyro_b.x -= dev->imu[1].gyro_bias_run.x;
+        gyro_b.y -= dev->imu[1].gyro_bias_run.y;
+        gyro_b.z -= dev->imu[1].gyro_bias_run.z;
+    }
+
+    /* ---- 5. 加权融合 ---- */
     float alpha = dev->cfg.alpha;
     icm42688_axis3f_t accel_fused, gyro_fused;
 
@@ -276,24 +295,6 @@ icm42688_err_t dual_imu_update(dual_imu_dev_t *dev,
         /* 仅 B 有效 */
         accel_fused = accel_b;
         gyro_fused  = gyro_b;
-    }
-
-    /* ---- 5. 交叉陀螺仪偏置补偿 ---- */
-    if (dev->cfg.enable_cross_bias && dev->imu[0].online && dev->imu[1].online) {
-        /*
-         * 运行时偏置估计: 用两路陀螺仪差值的一半作为偏置修正
-         * 假设: 静止时两路输出应相同, 差值 = (bias_a - bias_b)
-         * 修正: bias_est = (gyro_a - gyro_b) / 2
-         */
-        float dt = 1.0f / dev->cfg.sample_hz;
-        float decay = 0.001f;  /* 偏置估计衰减因子 (极慢收敛) */
-
-        dev->imu[0].gyro_bias_run.x += (gyro_a.x - gyro_b.x) * 0.5f * dt * decay;
-        dev->imu[0].gyro_bias_run.y += (gyro_a.y - gyro_b.y) * 0.5f * dt * decay;
-        dev->imu[0].gyro_bias_run.z += (gyro_a.z - gyro_b.z) * 0.5f * dt * decay;
-        dev->imu[1].gyro_bias_run.x = -dev->imu[0].gyro_bias_run.x;
-        dev->imu[1].gyro_bias_run.y = -dev->imu[0].gyro_bias_run.y;
-        dev->imu[1].gyro_bias_run.z = -dev->imu[0].gyro_bias_run.z;
     }
 
     /* ---- 6. 置信度计算 ---- */
@@ -420,26 +421,29 @@ icm42688_err_t dual_imu_calibrate(dual_imu_dev_t *dev, uint32_t samples)
         if (fabsf(angle) > 0.01f) {
             /* 归一化叉积 = 旋转轴 */
             float inv_cross = 1.0f / sqrtf(cx*cx + cy*cy + cz*cz);
-            cx *= inv_cross;
-            cy *= inv_cross;
-            cz *= inv_cross;
+            float nx = cx * inv_cross;
+            float ny = cy * inv_cross;
+            float nz = cz * inv_cross;
 
-            /* 将轴角转换为欧拉角 (小角度近似) */
-            float angle_deg = angle * 180.0f / M_PI;
-            dev->cfg.misalign_roll  = cx * angle_deg;
-            dev->cfg.misalign_pitch = cy * angle_deg;
-            dev->cfg.misalign_yaw   = cz * angle_deg;
+            /* 罗德里格斯旋转公式 (Rodrigues' rotation formula):
+             *   R = I + sin(θ)*[k]× + (1-cos(θ))*[k]×²
+             * 直接生成 R_align, 不经过欧拉角 */
+            float s = sinf(angle);
+            float c = cosf(angle);
+            float t = 1.0f - c;
 
-            /* 重新计算对齐矩阵 */
-            dev->R_align = mat3_from_euler(
-                dev->cfg.misalign_roll,
-                dev->cfg.misalign_pitch,
-                dev->cfg.misalign_yaw);
+            dev->R_align.m[0][0] = t*nx*nx + c;
+            dev->R_align.m[0][1] = t*nx*ny - s*nz;
+            dev->R_align.m[0][2] = t*nx*nz + s*ny;
+            dev->R_align.m[1][0] = t*nx*ny + s*nz;
+            dev->R_align.m[1][1] = t*ny*ny + c;
+            dev->R_align.m[1][2] = t*ny*nz - s*nx;
+            dev->R_align.m[2][0] = t*nx*nz - s*ny;
+            dev->R_align.m[2][1] = t*ny*nz + s*nx;
+            dev->R_align.m[2][2] = t*nz*nz + c;
 
-            ESP_LOGI(TAG, "自动检测安装偏差: [%.2f°, %.2f°, %.2f°]",
-                     dev->cfg.misalign_roll,
-                     dev->cfg.misalign_pitch,
-                     dev->cfg.misalign_yaw);
+            ESP_LOGI(TAG, "自动检测安装偏差 (Rodrigues): axis=[%.4f,%.4f,%.4f] angle=%.2f°",
+                     nx, ny, nz, angle * 180.0f / M_PI);
         } else {
             ESP_LOGI(TAG, "两路传感器几乎对齐, 无需补偿");
         }

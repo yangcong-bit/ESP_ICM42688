@@ -96,7 +96,7 @@ void time_sync_gen_reply(uint8_t *reply_buf, int *reply_len,
     *reply_len = sizeof(timesync_packet_t);
 }
 
-int64_t time_sync_get_time(const time_sync_state_t *state)
+int64_t time_sync_get_time(time_sync_state_t *state)
 {
     int64_t local_us = esp_timer_get_time();
     if (state && state->synchronized) {

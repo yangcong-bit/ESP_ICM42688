@@ -15,6 +15,7 @@
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/event_groups.h"
 #include "icm42688_reg.h"
 
 #ifdef __cplusplus
@@ -85,6 +86,7 @@ typedef struct {
     icm42688_axis3f_t    gyro_bias;   /* 陀螺仪偏移校准 (dps) */
     int                  int_gpio;    /* 中断引脚号, -1 = 未配置 */
     SemaphoreHandle_t    int_sem;     /* Data Ready 二值信号量 */
+    EventGroupHandle_t   int_evtgrp;  /* Data Ready 事件组 (双路同步) */
     volatile uint32_t    int_count;   /* 中断触发计数 (诊断用) */
     uint8_t             *dma_tx_buf;  /* 预分配 DMA TX 缓冲 (init时分配) */
     uint8_t             *dma_rx_buf;  /* 预分配 DMA RX 缓冲 (init时分配) */
@@ -186,6 +188,22 @@ icm42688_err_t icm42688_wait_drdy(icm42688_dev_t *dev, uint32_t timeout_ms);
  * @brief 获取中断触发次数 (诊断用)
  */
 uint32_t icm42688_get_int_count(const icm42688_dev_t *dev);
+
+/**
+ * @brief 双路 EventGroup 同时等待 Data Ready
+ *
+ * 同时等待 dev_a 和 dev_b 的中断事件位,
+ * 任一路触发即返回, 实现真正的并发等待。
+ * 解决顺序阻塞导致的延迟问题。
+ *
+ * @param dev_a      IMU-A 设备
+ * @param dev_b      IMU-B 设备
+ * @param timeout_ms 超时毫秒
+ * @return ICM42688_OK 至少一路触发, ICM42688_ERR_TIMEOUT 全部超时
+ */
+icm42688_err_t icm42688_wait_drdy_group(icm42688_dev_t *dev_a,
+                                          icm42688_dev_t *dev_b,
+                                          uint32_t timeout_ms);
 
 /* ============================================================
  *  API — 偏移校准

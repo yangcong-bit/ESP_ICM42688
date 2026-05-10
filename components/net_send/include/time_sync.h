@@ -96,7 +96,7 @@ void time_sync_gen_reply(uint8_t *reply_buf, int *reply_len,
  * 如果已同步: 返回 local_time + offset
  * 如果未同步: 返回 local_time (无修正)
  */
-int64_t time_sync_get_time(const time_sync_state_t *state);
+int64_t time_sync_get_time(time_sync_state_t *state);
 
 /**
  * @brief 同步是否有效 (距上次同步 < 5 秒)

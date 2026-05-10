@@ -26,10 +26,10 @@ typedef struct {
 // 初始化滤波器
 void eskf_init(eskf_t *eskf, eskf_nominal_state_t *nominal);
 
-// 核心预测步 (Flash XIP, 不占用宝贵 IRAM)
-void eskf_predict(eskf_t *eskf, eskf_nominal_state_t *nominal, const float gyro[3], float dt);
+// 核心预测步 (IRAM, 确保 1ms 闭环绝对确定性)
+void IRAM_ATTR eskf_predict(eskf_t *eskf, eskf_nominal_state_t *nominal, const float gyro[3], float dt);
 
-// 核心更新步 (Flash XIP, 序贯更新，消灭矩阵求逆)
-void eskf_update_accel(eskf_t *eskf, eskf_nominal_state_t *nominal, const float accel[3]);
+// 核心更新步 (IRAM, 序贯更新消灭矩阵求逆)
+void IRAM_ATTR eskf_update_accel(eskf_t *eskf, eskf_nominal_state_t *nominal, const float accel[3]);
 
 #endif

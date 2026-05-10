@@ -102,10 +102,10 @@ static void imu_task(void *arg)
     ESP_LOGI(TAG, "imu_task 启动 (Core1, 优先级 15)");
 
     while (1) {
-        /* 严格双硬件中断同步等待 Data Ready */
-        icm42688_err_t drdy_a = icm42688_wait_drdy(&dual_dev->imu[0].dev[0], 2);
-        icm42688_err_t drdy_b = icm42688_wait_drdy(&dual_dev->imu[1].dev[0], 2);
-        if (drdy_a == ICM42688_ERR_TIMEOUT && drdy_b == ICM42688_ERR_TIMEOUT) {
+        /* 双路 EventGroup 并发等待: 任一路触发即进入读取 */
+        icm42688_err_t drdy = icm42688_wait_drdy_group(
+            &dual_dev->imu[0].dev[0], &dual_dev->imu[1].dev[0], 2);
+        if (drdy == ICM42688_ERR_TIMEOUT) {
             vTaskDelay(pdMS_TO_TICKS(1));
             continue;
         }

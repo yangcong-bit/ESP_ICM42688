@@ -262,7 +262,7 @@ icm42688_err_t icm42688_init(icm42688_dev_t *dev,
         ret = spi_bus_initialize(spi_cfg->spi_host, &bus_cfg, SPI_DMA_CH_AUTO);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "SPI bus init failed: %s", esp_err_to_name(ret));
-            return ICM42688_ERR_SPI_INIT;
+            goto dma_cleanup;
         }
         s_spi_bus_inited[host_idx] = true;
         ESP_LOGI(TAG, "SPI%d bus initialized (shared)", spi_cfg->spi_host);
@@ -277,7 +277,7 @@ icm42688_err_t icm42688_init(icm42688_dev_t *dev,
     ret = spi_bus_add_device(spi_cfg->spi_host, &dev_cfg, &dev->spi_dev);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "SPI add device failed: %s", esp_err_to_name(ret));
-        return ICM42688_ERR_SPI_INIT;
+        goto dma_cleanup;
     }
 
     dev->initialized = true;
@@ -287,15 +287,16 @@ icm42688_err_t icm42688_init(icm42688_dev_t *dev,
 
     /* ---- 软复位 ---- */
     icm42688_err_t err = icm42688_reset(dev);
-    if (err != ICM42688_OK) return err;
+    if (err != ICM42688_OK) goto dma_cleanup;
 
     /* ---- 验证 WHO_AM_I ---- */
     uint8_t who = 0;
     err = icm42688_read_reg(dev, ICM42688_REG_WHO_AM_I, &who);
-    if (err != ICM42688_OK) return err;
+    if (err != ICM42688_OK) goto dma_cleanup;
     if (who != ICM42688_WHO_AM_I_VALUE) {
         ESP_LOGE(TAG, "WHO_AM_I mismatch: 0x%02X (expected 0x%02X)", who, ICM42688_WHO_AM_I_VALUE);
-        return ICM42688_ERR_WHO_AM_I;
+        err = ICM42688_ERR_WHO_AM_I;
+        goto dma_cleanup;
     }
     ESP_LOGI(TAG, "WHO_AM_I = 0x%02X ✓", who);
 
@@ -305,28 +306,28 @@ icm42688_err_t icm42688_init(icm42688_dev_t *dev,
     uint8_t pwr = (ICM42688_MODE_LOWNOISE << 2)  /* Accel = low-noise */
                 | (ICM42688_MODE_LOWNOISE << 0);  /* Gyro  = low-noise */
     err = spi_write_reg(dev, ICM42688_REG_PWR_MGMT0, pwr);
-    if (err != ICM42688_OK) return err;
+    if (err != ICM42688_OK) goto dma_cleanup;
 
     vTaskDelay(pdMS_TO_TICKS(10));  /* 等待电源稳定 */
 
     /* 陀螺仪: 量程 + ODR */
     uint8_t gyro_cfg = (dev->cfg.gyro_fs & 0x1C) | (dev->cfg.gyro_odr << 3);
     err = spi_write_reg(dev, ICM42688_REG_GYRO_CONFIG0, gyro_cfg);
-    if (err != ICM42688_OK) return err;
+    if (err != ICM42688_OK) goto dma_cleanup;
 
     /* 加速度计: 量程 + ODR */
     uint8_t accel_cfg = (dev->cfg.accel_fs & 0x1C) | (dev->cfg.accel_odr << 3);
     err = spi_write_reg(dev, ICM42688_REG_ACCEL_CONFIG0, accel_cfg);
-    if (err != ICM42688_OK) return err;
+    if (err != ICM42688_OK) goto dma_cleanup;
 
     /* INT1 配置:  data-ready interrupt, push-pull, active-high */
     err = spi_write_reg(dev, ICM42688_REG_INT_CONFIG,
                         ICM42688_BIT_INT1_POLARITY | ICM42688_BIT_INT1_PUSH_PULL);
-    if (err != ICM42688_OK) return err;
+    if (err != ICM42688_OK) goto dma_cleanup;
 
     /* INT_SOURCE0: data-ready → INT1 */
     err = spi_write_reg(dev, ICM42688_REG_INT_SOURCE0, 0x08);  /* UI_DRDY_INT1_EN */
-    if (err != ICM42688_OK) return err;
+    if (err != ICM42688_OK) goto dma_cleanup;
 
     ESP_LOGI(TAG, "ICM-42688-P initialized: Accel ±%s, Gyro ±%s, ODR %dHz",
              (dev->cfg.accel_fs == ICM42688_ACCEL_16G) ? "16g" :
@@ -337,7 +338,16 @@ icm42688_err_t icm42688_init(icm42688_dev_t *dev,
              (dev->cfg.gyro_fs == ICM42688_GYRO_500DPS)  ? "500dps" :
              (dev->cfg.gyro_fs == ICM42688_GYRO_250DPS)  ? "250dps" :
              (dev->cfg.gyro_fs == ICM42688_GYRO_125DPS)  ? "125dps": "?",
-             1000);  /* TODO: 从 ODR 枚举计算实际值 */
+             1000);
+
+    return ICM42688_OK;
+
+dma_cleanup:
+    heap_caps_free(dev->dma_tx_buf);
+    heap_caps_free(dev->dma_rx_buf);
+    dev->dma_tx_buf = NULL;
+    dev->dma_rx_buf = NULL;
+    return err;
 
     return ICM42688_OK;
 }
@@ -500,15 +510,25 @@ void icm42688_set_gyro_bias(icm42688_dev_t *dev, icm42688_axis3f_t bias)
  * ============================================================ */
 
 /*
- * 注意: ISR 必须放在 IRAM 中, 但它本身非常轻量 (仅释放信号量),
- * 不会显著增加 IRAM 占用。
+ * ISR: 设置事件组位 + 释放信号量 (双路同步支持)
  */
 static void IRAM_ATTR icm42688_int_isr(void *arg)
 {
     icm42688_dev_t *dev = (icm42688_dev_t *)arg;
     dev->int_count++;
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    xSemaphoreGiveFromISR(dev->int_sem, &xHigherPriorityTaskWoken);
+
+    /* 信号量: 供单路 wait_drdy 使用 */
+    if (dev->int_sem) {
+        xSemaphoreGiveFromISR(dev->int_sem, &xHigherPriorityTaskWoken);
+    }
+    /* 事件组: 供双路同步 wait_drdy_group 使用 */
+    if (dev->int_evtgrp) {
+        /* 用 int_gpio 的低位作为事件位 (0=IMU-A, 1=IMU-B) */
+        int bit = (dev->int_gpio == 0) ? 0 : 1;
+        xEventGroupSetBitsFromISR(dev->int_evtgrp, (1 << bit), &xHigherPriorityTaskWoken);
+    }
+
     if (xHigherPriorityTaskWoken) {
         portYIELD_FROM_ISR();
     }
@@ -522,6 +542,15 @@ icm42688_err_t icm42688_init_interrupt(icm42688_dev_t *dev, int int_pin)
     dev->int_sem = xSemaphoreCreateBinary();
     if (!dev->int_sem) {
         ESP_LOGE(TAG, "Failed to create interrupt semaphore");
+        return ICM42688_ERR_CONFIG;
+    }
+
+    /* 创建事件组 (用于双路同步) */
+    dev->int_evtgrp = xEventGroupCreate();
+    if (!dev->int_evtgrp) {
+        ESP_LOGE(TAG, "Failed to create interrupt event group");
+        vSemaphoreDelete(dev->int_sem);
+        dev->int_sem = NULL;
         return ICM42688_ERR_CONFIG;
     }
 
@@ -577,4 +606,42 @@ icm42688_err_t icm42688_wait_drdy(icm42688_dev_t *dev, uint32_t timeout_ms)
 uint32_t icm42688_get_int_count(const icm42688_dev_t *dev)
 {
     return dev ? dev->int_count : 0;
+}
+
+/* ============================================================
+ *  双路 EventGroup 同步等待
+ *  同时等待 dev_a 和 dev_b 的中断事件位,
+ *  任一路触发即返回, 实现真正的并发等待。
+ * ============================================================ */
+icm42688_err_t icm42688_wait_drdy_group(icm42688_dev_t *dev_a,
+                                          icm42688_dev_t *dev_b,
+                                          uint32_t timeout_ms)
+{
+    if (!dev_a || !dev_b) return ICM42688_ERR_CONFIG;
+    if (!dev_a->int_evtgrp || !dev_b->int_evtgrp) return ICM42688_ERR_NOT_INIT;
+
+    /* 两个事件组各用 bit0, 合并为同一组后同时等待 bit0 | bit1 */
+    EventBits_t bits_a = (1 << 0);  /* IMU-A 的事件位 */
+    EventBits_t bits_b = (1 << 1);  /* IMU-B 的事件位 */
+    EventBits_t wait_bits = bits_a | bits_b;
+
+    /* 使用 IMU-A 的事件组作为共享组 (两路 ISR 都往同一组写) */
+    EventGroupHandle_t shared = dev_a->int_evtgrp;
+
+    /* 清除之前的位, 避免读到旧数据 */
+    xEventGroupClearBits(shared, wait_bits);
+
+    TickType_t ticks = pdMS_TO_TICKS(timeout_ms);
+    if (timeout_ms == 0 || timeout_ms == UINT32_MAX) ticks = portMAX_DELAY;
+
+    /* 等待: 任一路触发即返回 (等待 OR 条件) */
+    EventBits_t triggered = xEventGroupWaitBits(shared, wait_bits,
+                                                 pdFALSE,  /* 不清除位 */
+                                                 pdFALSE,  /* OR: 任一位即可 */
+                                                 ticks);
+
+    if (triggered == 0) {
+        return ICM42688_ERR_TIMEOUT;
+    }
+    return ICM42688_OK;
 }
