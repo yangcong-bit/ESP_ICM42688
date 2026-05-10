@@ -643,10 +643,10 @@ icm42688_err_t icm42688_wait_drdy_group(icm42688_dev_t *dev_a,
     TickType_t ticks = pdMS_TO_TICKS(timeout_ms);
     if (timeout_ms == 0 || timeout_ms == UINT32_MAX) ticks = portMAX_DELAY;
 
-    /* 等待: 任一路触发即返回 (等待 OR 条件) */
+    /* 等待: 两路均触发才返回 (AND), 整体超时 2ms 不崩溃 */
     EventBits_t triggered = xEventGroupWaitBits(shared, wait_bits,
-                                                 pdFALSE,  /* 不清除位 */
-                                                 pdFALSE,  /* OR: 任一位即可 */
+                                                 pdTRUE,   /* 退出时清除位 */
+                                                 pdTRUE,   /* AND: 两路均满足才返回 */
                                                  ticks);
 
     if (triggered == 0) {

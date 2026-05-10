@@ -284,6 +284,7 @@ void app_main(void)
     uint8_t mac[6];
     esp_wifi_get_mac(WIFI_IF_STA, mac);
     s_node_id = mac[5];  /* MAC 最后一字节作为 Node ID */
+    if (s_node_id == 0xFF) s_node_id = 0xFE;  /* 避开广播保留字 0xFF */
     net_set_node_id(s_node_id);
     net_time_sync_init();
     ESP_LOGI(TAG, "ESP-NOW 就绪 (MAC:%02X:%02X:%02X:%02X:%02X:%02X → node_id=0x%02X)",
