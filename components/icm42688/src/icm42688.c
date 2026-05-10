@@ -286,7 +286,8 @@ icm42688_err_t icm42688_init(icm42688_dev_t *dev,
     dev->int_count = 0;
 
     /* ---- 软复位 ---- */
-    icm42688_err_t err = icm42688_reset(dev);
+    icm42688_err_t err = ICM42688_OK;
+    err = icm42688_reset(dev);
     if (err != ICM42688_OK) goto dma_cleanup;
 
     /* ---- 验证 WHO_AM_I ---- */
