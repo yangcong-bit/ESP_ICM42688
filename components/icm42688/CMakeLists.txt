@@ -10,4 +10,5 @@ idf_component_register(
         driver
         esp_timer
         heap
+        esp-dsp
 )
