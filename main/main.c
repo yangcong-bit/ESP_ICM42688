@@ -257,10 +257,13 @@ void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(50));
     ESP_LOGI(TAG, "LDO 稳压完成, 开始 SPI 初始化");
 
-    /* ---- OLED 初始化 (IO35 电源 + IO36 复位时序) ---- */
+    /* ---- OLED 初始化 (含 I2C 硬件探测, 无屏时自动降级) ---- */
+    bool is_oled_ready = false;
     oled_err_t oled_err = oled_init();
-    if (oled_err != OLED_OK) {
-        ESP_LOGW(TAG, "OLED init failed, display disabled");
+    if (oled_err == OLED_OK) {
+        is_oled_ready = true;
+    } else {
+        ESP_LOGW(TAG, "[Fallback] OLED 不可用, 系统降级为无屏(Headless)模式");
     }
 
     /* ---- 电池 ADC 初始化 ---- */
@@ -417,9 +420,13 @@ void app_main(void)
     xTaskCreatePinnedToCore(imu_task, "imu_task", 8192, &dual_dev, 15, NULL, 1);
     ESP_LOGI(TAG, "imu_task 已创建 (Core1, 优先级15, 栈8KB)");
 
-    /* 创建 OLED 显示任务 (优先级 2, 低频刷新) */
-    xTaskCreate(oled_task, "oled_task", 4096, NULL, 2, NULL);
-    ESP_LOGI(TAG, "oled_task 已创建 (优先级2, 10Hz 刷新)");
+    /* 条件创建 OLED 显示任务 (无屏模式下省 4KB 栈 + CPU 开销) */
+    if (is_oled_ready) {
+        xTaskCreate(oled_task, "oled_task", 4096, NULL, 2, NULL);
+        ESP_LOGI(TAG, "oled_task 已创建 (优先级2, 10Hz 刷新)");
+    } else {
+        ESP_LOGI(TAG, "无屏模式: oled_task 取消创建, 释放 4KB 任务栈与 CPU 资源");
+    }
 
     /* [致命 Bug 4 修复] 释放 Core 0, 防止触发 Task Watchdog Panic (TWDT)
      * 死循环必须让出时间片给 IDLE 任务, 否则内存无法回收, 触发看门狗重启 */

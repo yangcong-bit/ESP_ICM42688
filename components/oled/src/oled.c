@@ -142,7 +142,21 @@ oled_err_t oled_init(void)
         return OLED_ERR_I2C;
     }
 
-    /* 5. SSD1306 初始化命令 (64x32 专用) */
+    /* 4.5 I2C 硬件探测 (Probe) - 防止无屏时 I2C 总线死锁触发看门狗 */
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (OLED_I2C_ADDR << 1) | I2C_MASTER_WRITE, true);
+    i2c_master_stop(cmd);
+    ret = i2c_master_cmd_begin(OLED_I2C_PORT, cmd, pdMS_TO_TICKS(50));
+    i2c_cmd_link_delete(cmd);
+
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "I2C 探测失败: 未检测到屏幕 (ERR: %s)", esp_err_to_name(ret));
+        i2c_driver_delete(OLED_I2C_PORT);
+        return OLED_ERR_I2C;
+    }
+
+    /* 5. SSD1306 初始化命令 (只有探测到屏幕才会走到这里) */
     ssd1306_init_cmds();
 
     /* 6. 清屏 */
