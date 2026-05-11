@@ -118,7 +118,38 @@ oled_err_t oled_init(void)
     /* 2. 等待 LDO 稳压 */
     vTaskDelay(pdMS_TO_TICKS(50));
 
-    /* 3. 硬件复位时序 (RES#) */
+    /* [F7] 3. 物理阻抗探测 (Bus Sanity Check)
+     * 在 i2c_driver_install 之前, 用 GPIO 内部弱下拉 + 外部上拉的
+     * 阻抗分压原理嗅探 SDA/SCL 电平, 判定总线上是否存在屏幕。
+     * 无屏时 SDA/SCL 悬空 → 内部下拉拉低 → 检测到低电平 → 安全退出。
+     * 避免裸板引脚悬空时调用 i2c_master_init 触发 TG1WDT_SYS_RST。 */
+    ESP_LOGI(TAG, "执行 I2C 总线物理阻抗探测...");
+    gpio_config_t probe_io = {
+        .pin_bit_mask = (1ULL << OLED_PIN_SDA) | (1ULL << OLED_PIN_SCL),
+        .mode         = GPIO_MODE_INPUT,
+        .pull_up_en   = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_ENABLE,
+    };
+    gpio_config(&probe_io);
+    vTaskDelay(pdMS_TO_TICKS(5));  /* 等待内部下拉电平稳定 */
+
+    int sda_level = gpio_get_level(OLED_PIN_SDA);
+    int scl_level = gpio_get_level(OLED_PIN_SCL);
+
+    /* 恢复引脚默认状态, 交还给 I2C 控制器 */
+    gpio_reset_pin(OLED_PIN_SDA);
+    gpio_reset_pin(OLED_PIN_SCL);
+
+    if (sda_level == 0 || scl_level == 0) {
+        ESP_LOGW(TAG, "探测失败: SDA=%d SCL=%d (被下拉为低, 无外部上拉电阻, 无屏幕)",
+                 sda_level, scl_level);
+        return OLED_ERR_I2C;  /* 不碰 i2c_master_init, 从根源避免硬件死锁 */
+    }
+
+    ESP_LOGI(TAG, "探测成功: SDA=%d SCL=%d (检测到外部上拉电阻, 屏幕就绪)",
+             sda_level, scl_level);
+
+    /* 4. 硬件复位时序 (RES#) */
     gpio_config_t res_io = {
         .pin_bit_mask = (1ULL << OLED_PIN_RES),
         .mode         = GPIO_MODE_OUTPUT,
@@ -135,28 +166,14 @@ oled_err_t oled_init(void)
     vTaskDelay(pdMS_TO_TICKS(20));
     ESP_LOGI(TAG, "RES# 复位序列完成");
 
-    /* 4. I2C 初始化 */
+    /* 5. I2C 初始化 (此时总线上确认有上拉, 状态机绝不会卡死) */
     esp_err_t ret = i2c_master_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "I2C init failed");
         return OLED_ERR_I2C;
     }
 
-    /* 4.5 I2C 硬件探测 (Probe) - 防止无屏时 I2C 总线死锁触发看门狗 */
-    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (OLED_I2C_ADDR << 1) | I2C_MASTER_WRITE, true);
-    i2c_master_stop(cmd);
-    ret = i2c_master_cmd_begin(OLED_I2C_PORT, cmd, pdMS_TO_TICKS(50));
-    i2c_cmd_link_delete(cmd);
-
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "I2C 探测失败: 未检测到屏幕 (ERR: %s)", esp_err_to_name(ret));
-        i2c_driver_delete(OLED_I2C_PORT);
-        return OLED_ERR_I2C;
-    }
-
-    /* 5. SSD1306 初始化命令 (只有探测到屏幕才会走到这里) */
+    /* 6. SSD1306 初始化命令 */
     ssd1306_init_cmds();
 
     /* 6. 清屏 */
