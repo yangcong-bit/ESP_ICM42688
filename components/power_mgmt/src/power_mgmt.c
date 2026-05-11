@@ -201,8 +201,8 @@ void pm_enter_dead_zone(pm_ctx_t *pm)
     pm->ulp_active = true;
 
     /* 5. 设置 ULP ADC 阈值 (共享 RTC 内存) */
-    extern volatile uint32_t adc_threshold_3_5v;
-    adc_threshold_3_5v = pm->adc_threshold_3_5v;
+    extern volatile uint32_t ulp_adc_threshold_3_5v;
+    ulp_adc_threshold_3_5v = pm->adc_threshold_3_5v;
 
     /* 6. 启动 ULP 协处理器 */
     ulp_riscv_run();
