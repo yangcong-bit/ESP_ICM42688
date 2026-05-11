@@ -143,6 +143,7 @@ static void oled_task(void *arg)
  *    电池 ≤ 3.3V → ULP 接管, 无限期深睡
  * ============================================================ */
 static pm_ctx_t s_pm;  /* 电源管理上下文 */
+static bool s_imu_hardware_missing = false;  /* IMU 硬件缺失标志: true 时进入模拟模式 */
 
 static void imu_task(void *arg)
 {
@@ -152,6 +153,12 @@ static void imu_task(void *arg)
     ESP_LOGI(TAG, "imu_task 启动 (Core1, 优先级 15, DFS 已启用)");
 
     while (1) {
+        /* [IMU 缺失保护] 硬件不存在时, 用延时模拟采样节奏, 验证 TDMA 时序 */
+        if (s_imu_hardware_missing) {
+            vTaskDelay(pdMS_TO_TICKS(10));  /* 模拟 100Hz 采样 */
+            continue;  /* 跳过解算/发送, 但保持任务存活 */
+        }
+
         /* 双路 EventGroup 并发等待: 任一路触发即进入读取 */
         icm42688_err_t drdy = icm42688_wait_drdy_group(
             &dual_dev->imu[0].dev[0], &dual_dev->imu[1].dev[0], 2);
@@ -334,67 +341,73 @@ void app_main(void)
     /* ---- 4. 初始化 IMU-A ---- */
     ESP_LOGI(TAG, "初始化 IMU-A...");
     icm42688_dev_t imu_a;
-    icm42688_err_t err = icm42688_init(&imu_a, &spi_cfg_a, &sensor_cfg);
-    if (err != ICM42688_OK) {
-        ESP_LOGE(TAG, "IMU-A init failed: %d", err);
-        return;
+    icm42688_err_t err_a = icm42688_init(&imu_a, &spi_cfg_a, &sensor_cfg);
+    if (err_a != ICM42688_OK) {
+        ESP_LOGE(TAG, "IMU-A 硬件未就绪 (ERR:%d), 进入模拟模式", err_a);
     }
 
     /* ---- 5. 初始化 IMU-B ---- */
     ESP_LOGI(TAG, "初始化 IMU-B...");
     icm42688_dev_t imu_b;
-    err = icm42688_init(&imu_b, &spi_cfg_b, &sensor_cfg);
-    if (err != ICM42688_OK) {
-        ESP_LOGE(TAG, "IMU-B init failed: %d", err);
-        return;
+    icm42688_err_t err_b = icm42688_init(&imu_b, &spi_cfg_b, &sensor_cfg);
+    if (err_b != ICM42688_OK) {
+        ESP_LOGE(TAG, "IMU-B 硬件未就绪 (ERR:%d), 进入模拟模式", err_b);
     }
 
-    /* ---- 5.1 配置中断驱动 (共享 EventGroup, 双路对齐) ---- */
-    ESP_LOGI(TAG, "配置中断驱动读取...");
-    EventGroupHandle_t imu_drdy_evtgrp = xEventGroupCreate();
-    configASSERT(imu_drdy_evtgrp);
+    /* 双 IMU 融合设备 (硬件缺失时零初始化, imu_task 进入模拟模式) */
+    dual_imu_dev_t dual_dev = {0};
 
-    err = icm42688_init_interrupt(&imu_a, PIN_INT_A);
-    if (err != ICM42688_OK) {
-        ESP_LOGW(TAG, "IMU-A 中断配置失败, 降级为轮询模式");
+    /* 只有硬件初始化成功才配置中断 + 校准 */
+    if (err_a == ICM42688_OK && err_b == ICM42688_OK) {
+        /* ---- 5.1 配置中断驱动 (共享 EventGroup, 双路对齐) ---- */
+        ESP_LOGI(TAG, "配置中断驱动读取...");
+        EventGroupHandle_t imu_drdy_evtgrp = xEventGroupCreate();
+        configASSERT(imu_drdy_evtgrp);
+
+        icm42688_err_t err = icm42688_init_interrupt(&imu_a, PIN_INT_A);
+        if (err != ICM42688_OK) {
+            ESP_LOGW(TAG, "IMU-A 中断配置失败, 降级为轮询模式");
+        } else {
+            icm42688_set_event_group(&imu_a, imu_drdy_evtgrp, 0);
+        }
+
+        err = icm42688_init_interrupt(&imu_b, PIN_INT_B);
+        if (err != ICM42688_OK) {
+            ESP_LOGW(TAG, "IMU-B 中断配置失败, 降级为轮询模式");
+        } else {
+            icm42688_set_event_group(&imu_b, imu_drdy_evtgrp, 1);
+        }
+
+        /* ---- 6. 双 IMU 交叉校准 ---- */
+        ESP_LOGI(TAG, "请保持传感器静止, 开始交叉校准...");
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        dual_imu_cfg_t dual_cfg = {
+            .alpha             = FUSION_ALPHA,
+            .kp                = 1.0f,
+            .ki                = 0.005f,
+            .sample_hz         = SAMPLE_HZ,
+            .enable_misalign   = true,
+            .enable_cross_bias = true,
+            .misalign_roll     = MISALIGN_ROLL,
+            .misalign_pitch    = MISALIGN_PITCH,
+            .misalign_yaw      = MISALIGN_YAW,
+        };
+
+        err = dual_imu_init(&dual_dev, &imu_a, &imu_b, &dual_cfg);
+        if (err != ICM42688_OK) {
+            ESP_LOGE(TAG, "Dual IMU init failed: %d", err);
+            return;
+        }
+
+        err = dual_imu_calibrate(&dual_dev, 500);
+        if (err != ICM42688_OK) {
+            ESP_LOGW(TAG, "Cross calibration failed, continuing");
+        }
     } else {
-        icm42688_set_event_group(&imu_a, imu_drdy_evtgrp, 0);  /* IMU-A → bit 0 */
-    }
-
-    err = icm42688_init_interrupt(&imu_b, PIN_INT_B);
-    if (err != ICM42688_OK) {
-        ESP_LOGW(TAG, "IMU-B 中断配置失败, 降级为轮询模式");
-    } else {
-        icm42688_set_event_group(&imu_b, imu_drdy_evtgrp, 1);  /* IMU-B → bit 1 */
-    }
-
-    /* ---- 6. 双 IMU 交叉校准 ---- */
-    ESP_LOGI(TAG, "请保持传感器静止, 开始交叉校准...");
-    vTaskDelay(pdMS_TO_TICKS(1000));
-
-    dual_imu_cfg_t dual_cfg = {
-        .alpha             = FUSION_ALPHA,
-        .kp                = 1.0f,
-        .ki                = 0.005f,
-        .sample_hz         = SAMPLE_HZ,
-        .enable_misalign   = true,
-        .enable_cross_bias = true,
-        .misalign_roll     = MISALIGN_ROLL,
-        .misalign_pitch    = MISALIGN_PITCH,
-        .misalign_yaw      = MISALIGN_YAW,
-    };
-
-    dual_imu_dev_t dual_dev;
-    err = dual_imu_init(&dual_dev, &imu_a, &imu_b, &dual_cfg);
-    if (err != ICM42688_OK) {
-        ESP_LOGE(TAG, "Dual IMU init failed: %d", err);
-        return;
-    }
-
-    /* 执行交叉校准 (自动检测安装偏差) */
-    err = dual_imu_calibrate(&dual_dev, 500);
-    if (err != ICM42688_OK) {
-        ESP_LOGW(TAG, "Cross calibration failed, continuing");
+        /* 硬件缺失: 标记模拟模式, 跳过校准 */
+        s_imu_hardware_missing = true;
+        ESP_LOGW(TAG, "IMU 硬件缺失, 跳过中断/校准配置, 进入模拟模式");
     }
 
     /* ---- 7. 初始化 ESP-NOW 广播 + 时间同步 ---- */
