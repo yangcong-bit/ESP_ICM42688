@@ -12,7 +12,7 @@
 #include <stdint.h>
 #include "ulp_riscv.h"
 #include "ulp_riscv_utils.h"
-#include "ulp_riscv_adc.h"
+#include "ulp_riscv_adc_ulp_core.h"
 #include "hal/adc_types.h"
 
 /* ============================================================
@@ -34,8 +34,7 @@ int main(void)
 {
     /* 读取 RTC ADC (电池电压通道) */
     uint32_t adc_raw = 0;
-    ulp_riscv_adc_read_channel(ADC_UNIT_1, ADC_CHANNEL_7, &adc_raw);
-
+    adc_raw = ulp_riscv_adc_read_channel(ADC_UNIT_1, ADC_CHANNEL_7);
     /* 记录读数 (主核可通过 ULP RTC 内存读取此值进行调试) */
     ulp_adc_reading = adc_raw;
 
