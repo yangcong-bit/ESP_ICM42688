@@ -13,8 +13,6 @@
 #include "esp_pm.h"
 #include "esp_sleep.h"
 #include "driver/gpio.h"
-#include "ulp_riscv_adc.h"
-#include "ulp_riscv_utils.h"
 #include "esp_timer.h"
 #include "rom/ets_sys.h"
 #include <math.h>
