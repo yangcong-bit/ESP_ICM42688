@@ -197,16 +197,13 @@ void pm_enter_dead_zone(pm_ctx_t *pm)
     /* 2. 禁用 IMU WoM 唤醒源 (电池没电时不需要动作唤醒) */
     esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
 
-    /* 3. 配置 ULP Timer (每 500ms 唤醒一次 = 2Hz) */
-    esp_sleep_enable_timer_wakeup(500000);  /* 500ms */
-
-    /* 4. 加载 ULP 程序 (已编译的二进制) */
+    /* 3. 加载 ULP 程序 (已编译的二进制) */
     pm->ulp_active = true;
 
-    /* 5. 设置 ULP ADC 阈值 (共享 RTC 内存) */
+    /* 4. 设置 ULP ADC 阈值 (共享 RTC 内存) */
     ulp_adc_threshold_3_5v = pm->adc_threshold_3_5v;  /* 来自 ulp_power_mgmt_ulp.h */
 
-    /* 6. 启动 ULP 协处理器 */
+    /* 5. 启动 ULP 协处理器 */
     ulp_riscv_run();
 
     /* 7. 进入无限期深睡 */

@@ -88,6 +88,12 @@ void eskf_predict(eskf_t *eskf, eskf_nominal_state_t *nominal, const float gyro[
         for (int j = i + 1; j < 6; j++)
             eskf->P[i][j] = eskf->P[j][i] =
                 (eskf->P[i][j] + eskf->P[j][i]) * 0.5f;
+
+    /* [审查优化] 对角线微小正向注入: 防止长时 1000Hz 浮点积分
+     * 后 P 矩阵因浮点吸收 (Swamping) 失去正定性 */
+    for (int i = 0; i < 6; i++) {
+        eskf->P[i][i] += 1e-6f;
+    }
 }
 
 /* 更新步: 序贯更新 (SIMD 加速) */

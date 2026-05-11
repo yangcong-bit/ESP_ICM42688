@@ -134,6 +134,15 @@ icm42688_err_t icm42688_reset(icm42688_dev_t *dev);
  */
 void icm42688_deinit(icm42688_dev_t *dev);
 
+/**
+ * @brief [Bug 3] 启用 WoM (Wake-on-Motion) 模式
+ *
+ * 将 IMU 从 1000Hz Data-Ready 切换到 Accel Low-Power + WoM 检测。
+ * 必须在进入 Deep Sleep 前调用, 否则 INT1 持续触发导致秒醒死循环。
+ * INT1 输出: push-pull, active-high, 检测到运动时触发。
+ */
+icm42688_err_t icm42688_enable_wom(icm42688_dev_t *dev);
+
 /* ============================================================
  *  API — 数据读取 (polling)
  * ============================================================ */

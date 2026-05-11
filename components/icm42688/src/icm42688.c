@@ -379,7 +379,12 @@ icm42688_err_t icm42688_init(icm42688_dev_t *dev,
     return ICM42688_OK;
 
 dma_cleanup:
-    /* 【修改6】增加判空，防止分配失败时 free(NULL) 导致不必要的问题 */
+    /* [审查修复] SPI 设备泄露: spi_bus_add_device 成功后若后续配置失败,
+     * 必须移除 SPI 设备, 防止僵尸设备耗尽 CS 硬件资源 */
+    if (dev->spi_dev) {
+        spi_bus_remove_device(dev->spi_dev);
+        dev->spi_dev = NULL;
+    }
     if (dev->dma_tx_buf) heap_caps_free(dev->dma_tx_buf);
     if (dev->dma_rx_buf) heap_caps_free(dev->dma_rx_buf);
     dev->dma_tx_buf = NULL;
@@ -421,6 +426,54 @@ void icm42688_deinit(icm42688_dev_t *dev)
     dev->dma_tx_buf = NULL;
     dev->dma_rx_buf = NULL;
     dev->initialized = false;
+}
+
+/* ============================================================
+ *  API — WoM (Wake-on-Motion) 模式配置
+ *  ICM-42688-P APEX WoM: 低功耗模式下检测运动,
+ *  INT1 在检测到运动时触发唤醒信号。
+ *  必须在进入 Deep Sleep 前调用, 否则 IMU 仍在 1000Hz
+ *  Data-Ready 模式, INT1 持续触发导致秒醒死循环。
+ * ============================================================ */
+icm42688_err_t icm42688_enable_wom(icm42688_dev_t *dev)
+{
+    if (!dev || !dev->initialized) return ICM42688_ERR_NOT_INIT;
+
+    icm42688_err_t err;
+
+    /* 1. 进入 Standby (停止数据输出) */
+    err = spi_write_reg(dev, ICM42688_REG_PWR_MGMT0, 0x00);
+    if (err != ICM42688_OK) return err;
+    vTaskDelay(pdMS_TO_TICKS(1));
+
+    /* 2. 切换到 Bank 4 (APEX 配置) */
+    err = spi_write_reg(dev, ICM42688_REG_REG_BANK_SEL, 4);
+    if (err != ICM42688_OK) return err;
+
+    /* 3. WOM 阈值: 寄存器 0x13, 默认 40mg (值=0x28), 灵敏度约 15.625mg/LSB */
+    err = spi_write_reg(dev, 0x13, 0x28);  /* WOM_TH=40mg */
+    if (err != ICM42688_OK) return err;
+
+    /* 4. 切回 Bank 0 */
+    err = spi_write_reg(dev, ICM42688_REG_REG_BANK_SEL, 0);
+    if (err != ICM42688_OK) return err;
+
+    /* 5. INT1 配置: push-pull, active-high (匹配 ext0 wakeup level=1) */
+    err = spi_write_reg(dev, ICM42688_REG_INT_CONFIG,
+                        ICM42688_BIT_INT1_POLARITY | ICM42688_BIT_INT1_PUSH_PULL);
+    if (err != ICM42688_OK) return err;
+
+    /* 6. INT_SOURCE0: WoM → INT1 (bit3 = WOM_INT1_EN) */
+    err = spi_write_reg(dev, ICM42688_REG_INT_SOURCE0, 0x08);
+    if (err != ICM42688_OK) return err;
+
+    /* 7. PWR_MGMT0: Accel=low-power (bit[3:2]=01), Gyro=off (bit[1:0]=00)
+     *    WoM 只需 Accel, Gyro 关闭以省电 */
+    err = spi_write_reg(dev, ICM42688_REG_PWR_MGMT0, 0x04);
+    if (err != ICM42688_OK) return err;
+
+    ESP_LOGI(TAG, "WoM 模式已启用: Accel=low-power, WOM_TH=40mg, INT1=push-pull/high");
+    return ICM42688_OK;
 }
 
 /* ============================================================
@@ -670,19 +723,34 @@ icm42688_err_t icm42688_wait_drdy_group(icm42688_dev_t *dev_a,
 {
     if (!dev_a || !dev_b) return ICM42688_ERR_CONFIG;
 
-    /* [F15 Task 2.2] Direct Task Notification 路径 (优先, 零开销) */
+    /* [F15 Bug 1 修复] Task Notification 累加等待循环
+     * xTaskNotifyWaitIndexed 收到任一 bit 即唤醒, 不具备 EventGroup 的 Wait-for-All。
+     * 必须用 while 循环累加状态位, 直到双路都触发或真正超时。 */
     if (dev_a->notify_task && dev_b->notify_task) {
         uint32_t notify_mask = dev_a->notify_bit | dev_b->notify_bit;
-        uint32_t notified = 0;
+        uint32_t current_bits = 0;
         TickType_t ticks = pdMS_TO_TICKS(timeout_ms);
         if (timeout_ms == 0 || timeout_ms == UINT32_MAX) ticks = portMAX_DELAY;
 
-        xTaskNotifyWaitIndexed(0, 0, notify_mask, &notified, ticks);
+        TickType_t start_tick = xTaskGetTickCount();
+        while ((current_bits & notify_mask) != notify_mask) {
+            TickType_t elapsed = xTaskGetTickCount() - start_tick;
+            if (ticks != portMAX_DELAY && elapsed >= ticks) break;
 
-        if ((notified & notify_mask) == notify_mask) {
+            uint32_t new_bits = 0;
+            TickType_t remaining = (ticks == portMAX_DELAY) ? portMAX_DELAY : (ticks - elapsed);
+            if (remaining == 0) remaining = 1;
+
+            if (xTaskNotifyWaitIndexed(0, 0, notify_mask, &new_bits, remaining) == pdTRUE) {
+                current_bits |= new_bits;
+            } else {
+                break;  /* 真正超时 */
+            }
+        }
+
+        if ((current_bits & notify_mask) == notify_mask) {
             return ICM42688_OK;
         }
-        /* 超时: 清除残留通知位, 防止鬼影帧污染下一周期 */
         xTaskNotifyStateClearIndexed(dev_a->notify_task, 0);
         return ICM42688_ERR_TIMEOUT;
     }

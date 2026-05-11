@@ -213,6 +213,13 @@ static void imu_task(void *arg)
         float accel_arr[3] = { result.accel.x, result.accel.y, result.accel.z };
         float gyro_arr[3]  = { result.gyro.x,  result.gyro.y,  result.gyro.z };
         if (pm_check_stillness(&s_pm, accel_arr, gyro_arr)) {
+            /* [Bug 3 修复] 配置 IMU WoM 模式: 从 1000Hz Data-Ready 切换到
+             * Accel Low-Power + WoM 检测, 防止 INT1 持续触发导致秒醒死循环 */
+            ESP_LOGW(TAG, "配置双路 IMU 进入 WoM 模式...");
+            icm42688_enable_wom(&dual_dev->imu[0].dev[0]);
+            icm42688_enable_wom(&dual_dev->imu[1].dev[0]);
+            vTaskDelay(pdMS_TO_TICKS(10));  /* 等待 IMU 模式切换稳定 */
+
             /* 持续静止, 进入 WoM Deep Sleep */
             pm_enter_wom_sleep(&s_pm);
             /* 不会返回到这里 */
