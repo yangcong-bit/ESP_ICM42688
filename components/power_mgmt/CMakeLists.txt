@@ -1,0 +1,13 @@
+idf_component_register(
+    SRCS
+        "src/power_mgmt.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        driver
+        esp_timer
+        esp_hw_support
+        esp_sleep
+        log
+        freertos
+)

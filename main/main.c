@@ -37,6 +37,7 @@
 #include "esp_wifi.h"
 #include "oled.h"
 #include "battery.h"
+#include "power_mgmt.h"
 
 static const char *TAG = "main";
 
@@ -132,13 +133,23 @@ static void oled_task(void *arg)
 /* ============================================================
  *  IMU 采集任务 (优先级 15, Core 1, 绝对最高路权)
  *  底层无线发送不能打断传感器读取
+ *
+ *  DFS 策略:
+ *    ESKF 解算 + TDMA 时隙发送期间 → 240MHz (pm_enter_active)
+ *    时隙外空闲监听 → 80MHz (pm_enter_idle)
+ *  静止休眠:
+ *    连续 30 秒静止 → WoM Deep Sleep
+ *  死区保护:
+ *    电池 ≤ 3.3V → ULP 接管, 无限期深睡
  * ============================================================ */
+static pm_ctx_t s_pm;  /* 电源管理上下文 */
+
 static void imu_task(void *arg)
 {
     dual_imu_dev_t *dual_dev = (dual_imu_dev_t *)arg;
     dual_imu_result_t result;
 
-    ESP_LOGI(TAG, "imu_task 启动 (Core1, 优先级 15)");
+    ESP_LOGI(TAG, "imu_task 启动 (Core1, 优先级 15, DFS 已启用)");
 
     while (1) {
         /* 双路 EventGroup 并发等待: 任一路触发即进入读取 */
@@ -150,10 +161,33 @@ static void imu_task(void *arg)
         }
 
         /* 双路同步读取 + 融合 */
+        pm_enter_active(&s_pm);  /* DFS: ESKF 解算需要 240MHz */
         icm42688_err_t err = dual_imu_update(dual_dev, &result);
         if (err != ICM42688_OK) {
             vTaskDelay(pdMS_TO_TICKS(1));
             continue;
+        }
+
+        /* ---- 电源管理: 静止检测 ---- */
+        float accel_arr[3] = { result.accel.x, result.accel.y, result.accel.z };
+        float gyro_arr[3]  = { result.gyro.x,  result.gyro.y,  result.gyro.z };
+        if (pm_check_stillness(&s_pm, accel_arr, gyro_arr)) {
+            /* 持续静止, 进入 WoM Deep Sleep */
+            pm_enter_wom_sleep(&s_pm);
+            /* 不会返回到这里 */
+        }
+
+        /* ---- 电源管理: 死区检测 (每 100 帧检查一次) ---- */
+        static uint32_t pm_check_div = 0;
+        if (++pm_check_div >= 100) {
+            pm_check_div = 0;
+            float bat_v = battery_get_voltage();
+            if (bat_v < s_pm.cfg.dead_zone_voltage) {
+                ESP_LOGE(TAG, "电池电压 %.2fV < %.1fV, 进入死区休眠!",
+                         bat_v, s_pm.cfg.dead_zone_voltage);
+                pm_enter_dead_zone(&s_pm);
+                /* 不会返回到这里 */
+            }
         }
 
         /* 聚合: 每帧数据存入缓冲 */
@@ -194,6 +228,8 @@ static void imu_task(void *arg)
                 }
             }
         }
+
+        pm_enter_idle(&s_pm);  /* DFS: 发送完毕, 降频到 80MHz */
     }
 }
 
@@ -231,6 +267,30 @@ void app_main(void)
     battery_err_t bat_err = battery_init();
     if (bat_err != BATTERY_OK) {
         ESP_LOGW(TAG, "Battery ADC init failed");
+    }
+
+    /* ---- 电源管理初始化 (DFS + 静止检测 + ULP) ---- */
+    pm_cfg_t pm_cfg = {
+        .active_freq_mhz     = 240,
+        .idle_freq_mhz       = 80,
+        .dead_zone_voltage   = 3.3f,
+        .wake_voltage        = 3.5f,
+        .sleep_cfg = {
+            .accel_threshold_g  = 0.05f,
+            .gyro_threshold_dps = 1.0f,
+            .sleep_delay_ms     = 30000,  /* 30秒静止触发休眠 */
+            .wake_gpio          = PIN_INT_A,  /* IMU-A INT1 作为唤醒源 */
+        },
+    };
+    pm_init(&s_pm, &pm_cfg);
+
+    /* 初始化 ULP: 3.5V 对应的 ADC 原始值 (12-bit, 3100mV 满量程) */
+    int adc_3_5v_raw = (int)(3500.0f / 3100.0f * 4095.0f / BAT_VDIV_RATIO);
+    pm_ulp_init(&s_pm, adc_3_5v_raw);
+
+    /* ULP 唤醒检测 (深睡恢复后) */
+    if (pm_is_wakeup_from_ulp()) {
+        ESP_LOGW(TAG, "检测到 ULP 充电唤醒, 电压已恢复, 继续运行");
     }
 
     /* ---- 1. IMU-A SPI 配置 (独立 SPI2) ---- */
