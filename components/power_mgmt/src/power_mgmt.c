@@ -149,8 +149,8 @@ void pm_enter_wom_sleep(pm_ctx_t *pm)
     ESP_LOGW(TAG, "=== 进入 WoM Deep Sleep ===");
 
     /* 1. 关闭 OLED */
-    gpio_set_level(35, 0);  /* OLED PWR_EN = LOW */
-    gpio_set_level(36, 0);  /* OLED RES# = LOW (复位态) */
+    if (pm->cfg.oled_pwr_gpio >= 0) gpio_set_level(pm->cfg.oled_pwr_gpio, 0);
+    if (pm->cfg.oled_res_gpio >= 0) gpio_set_level(pm->cfg.oled_res_gpio, 0);
 
     /* 2. 通过 SPI 让 IMU 进入 WoM 模式 (需要外部调用) */
     /* 此处预留接口, 实际由主核在调用前完成 IMU WoM 配置 */
@@ -185,10 +185,10 @@ void pm_enter_dead_zone(pm_ctx_t *pm)
     ESP_LOGE(TAG, "============================================");
 
     /* 1. 关闭所有外设 */
-    gpio_set_level(35, 0);  /* OLED 关 */
-    gpio_set_level(36, 0);
-    gpio_set_level(PIN_LDO_EN1, 0);  /* IMU-A LDO 关 */
-    gpio_set_level(PIN_LDO_EN2, 0);  /* IMU-B LDO 关 */
+    if (pm->cfg.oled_pwr_gpio >= 0) gpio_set_level(pm->cfg.oled_pwr_gpio, 0);
+    if (pm->cfg.oled_res_gpio >= 0) gpio_set_level(pm->cfg.oled_res_gpio, 0);
+    if (pm->cfg.ldo_en1_gpio >= 0)  gpio_set_level(pm->cfg.ldo_en1_gpio, 0);   /* IMU-A LDO 关 */
+    if (pm->cfg.ldo_en2_gpio >= 0)  gpio_set_level(pm->cfg.ldo_en2_gpio, 0);   /* IMU-B LDO 关 */
 
     /* 2. 禁用 IMU WoM 唤醒源 (电池没电时不需要动作唤醒) */
     esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);

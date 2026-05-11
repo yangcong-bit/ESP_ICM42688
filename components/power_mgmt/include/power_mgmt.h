@@ -42,6 +42,10 @@ typedef struct {
     uint32_t idle_freq_mhz;       /* 空闲频率: 80MHz */
     float    dead_zone_voltage;   /* 死区电压阈值 (V) */
     float    wake_voltage;        /* ULP 唤醒电压阈值 (V) */
+    int      ldo_en1_gpio;        /* IMU-A LDO 使能 GPIO */
+    int      ldo_en2_gpio;        /* IMU-B LDO 使能 GPIO */
+    int      oled_pwr_gpio;       /* OLED 电源 GPIO */
+    int      oled_res_gpio;       /* OLED 复位 GPIO */
     pm_sleep_cfg_t sleep_cfg;     /* 休眠配置 */
 } pm_cfg_t;
 

@@ -275,6 +275,10 @@ void app_main(void)
         .idle_freq_mhz       = 80,
         .dead_zone_voltage   = 3.3f,
         .wake_voltage        = 3.5f,
+        .ldo_en1_gpio        = PIN_LDO_EN1,
+        .ldo_en2_gpio        = PIN_LDO_EN2,
+        .oled_pwr_gpio       = 35,
+        .oled_res_gpio       = 36,
         .sleep_cfg = {
             .accel_threshold_g  = 0.05f,
             .gyro_threshold_dps = 1.0f,
