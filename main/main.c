@@ -38,6 +38,7 @@
 #include "oled.h"
 #include "battery.h"
 #include "power_mgmt.h"
+#include "driver/ledc.h"
 
 static const char *TAG = "main";
 
@@ -91,6 +92,37 @@ static uint8_t s_node_id = 0;
 /* ============================================================
  *  ESP-NOW 配置 (无需路由器, 底层广播)
  * ============================================================ */
+
+/* ============================================================
+ *  ESP32 硬件时钟树: 32.768kHz PWM → IMU CLKIN (物理锁相)
+ * ============================================================ */
+#define PIN_IMU_CLKIN  21   /* 外部 32.768kHz 时钟驱动引脚 */
+
+static void imu_master_clock_init(void)
+{
+    ESP_LOGI(TAG, "启动硬件时钟树: 32.768kHz PWM -> IMU CLKIN (IO%d)", PIN_IMU_CLKIN);
+
+    ledc_timer_config_t ledc_timer = {
+        .speed_mode      = LEDC_LOW_SPEED_MODE,
+        .timer_num       = LEDC_TIMER_0,
+        .duty_resolution = LEDC_TIMER_4_BIT,
+        .freq_hz         = 32768,
+        .clk_cfg         = LEDC_USE_APB_CLK,
+    };
+    ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
+
+    ledc_channel_config_t ledc_channel = {
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .channel    = LEDC_CHANNEL_0,
+        .timer_sel  = LEDC_TIMER_0,
+        .intr_type  = LEDC_INTR_DISABLE,
+        .gpio_num   = PIN_IMU_CLKIN,
+        .duty       = 8,   /* 50% 占空比 (4-bit 分辨率: 16/2=8) */
+        .hpoint     = 0,
+    };
+    ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel));
+    ESP_LOGI(TAG, "CLKIN 时钟输出已启动: GPIO%d @ 32.768kHz", PIN_IMU_CLKIN);
+}
 
 /* ============================================================
  *  app_main
@@ -245,6 +277,9 @@ static void imu_task(void *arg)
 void app_main(void)
 {
     ESP_LOGI(TAG, "=== 双 ICM-42688-P + ESP-NOW ===");
+
+    /* ---- 启动 32.768kHz 硬件时钟树 (IMU 物理锁相) ---- */
+    imu_master_clock_init();
 
     /* ================================================================
      *  LDO 强控上电时序 (任务2)

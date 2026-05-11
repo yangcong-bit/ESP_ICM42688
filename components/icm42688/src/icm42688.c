@@ -308,6 +308,34 @@ icm42688_err_t icm42688_init(icm42688_dev_t *dev,
     }
     ESP_LOGI(TAG, "WHO_AM_I = 0x%02X ✓", who);
 
+    /* ---- [F15] 配置外部 RTC 时钟源 (ESP32 PWM 驱动 32.768kHz) ---- */
+    /* 1. 切换到 Bank 1 */
+    err = spi_write_reg(dev, ICM42688_REG_REG_BANK_SEL, 1);
+    if (err != ICM42688_OK) goto dma_cleanup;
+
+    /* 2. INTF_CONFIG5 (0x7B): 将 Pin 9 设为 CLKIN */
+    uint8_t intf_cfg5 = 0;
+    err = spi_read_reg(dev, 0x7B, &intf_cfg5);
+    if (err != ICM42688_OK) goto dma_cleanup;
+    intf_cfg5 &= ~0x06;   /* 清除 bit[2:1] */
+    intf_cfg5 |=  0x02;   /* 设为 10b: CLKIN 功能 */
+    err = spi_write_reg(dev, 0x7B, intf_cfg5);
+    if (err != ICM42688_OK) goto dma_cleanup;
+
+    /* 3. 切换回 Bank 0 */
+    err = spi_write_reg(dev, ICM42688_REG_REG_BANK_SEL, 0);
+    if (err != ICM42688_OK) goto dma_cleanup;
+
+    /* 4. INTF_CONFIG1 (0x4D): 开启 RTC 模式 (bit2) */
+    uint8_t intf_cfg1 = 0;
+    err = spi_read_reg(dev, 0x4D, &intf_cfg1);
+    if (err != ICM42688_OK) goto dma_cleanup;
+    intf_cfg1 |= (1 << 2);
+    err = spi_write_reg(dev, 0x4D, intf_cfg1);
+    if (err != ICM42688_OK) goto dma_cleanup;
+
+    ESP_LOGI(TAG, "已强制 IMU 锁相到外部 32.768kHz 时钟 (CLKIN)");
+
     /* ---- 配置传感器 ---- */
     /* PWR_MGMT0: 使能 Accel + Gyro (low-noise mode), 保留温度 */
     uint8_t pwr = (ICM42688_MODE_LOWNOISE << 2)  /* Accel = low-noise */
