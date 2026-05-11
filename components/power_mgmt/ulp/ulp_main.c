@@ -10,8 +10,10 @@
  */
 
 #include <stdint.h>
+#include "ulp_riscv.h"
 #include "ulp_riscv_utils.h"
 #include "ulp_riscv_adc.h"
+#include "hal/adc_types.h"
 
 /* ============================================================
  *  共享变量 (主核校准后写入, ULP 只读)
@@ -32,7 +34,7 @@ int main(void)
 {
     /* 读取 RTC ADC (电池电压通道) */
     uint32_t adc_raw = 0;
-    ulp_riscv_adc_read_channel(ULP_RISCV_ADC_UNIT_1, ULP_RISCV_ADC_CHANNEL_7, &adc_raw);
+    ulp_riscv_adc_read_channel(ADC_UNIT_1, ADC_CHANNEL_7, &adc_raw);
 
     /* 记录读数 (主核可通过 ULP RTC 内存读取此值进行调试) */
     ulp_adc_reading = adc_raw;
