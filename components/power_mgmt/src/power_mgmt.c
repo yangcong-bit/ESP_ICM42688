@@ -244,7 +244,14 @@ void pm_ulp_init(pm_ctx_t *pm, int adc_raw_threshold)
 
     pm->adc_threshold_3_5v = (uint32_t)adc_raw_threshold;
 
-    ESP_LOGI(TAG, "ULP 初始化: ADC阈值=%lu (对应 %.1fV)",
+    /* 配置 ULP 可使用的 ADC 通道 (GPIO2 → ADC1_CH1) */
+    extern volatile uint32_t ulp_adc_threshold_3_5v;
+    ulp_adc_threshold_3_5v = pm->adc_threshold_3_5v;
+
+    /* ULP Timer: 每 1 秒唤醒一次 */
+    ulp_set_wakeup_period(0, 1000000);
+
+    ESP_LOGI(TAG, "ULP 初始化: ADC阈值=%lu (对应 %.1fV), Timer=1s",
              (unsigned long)pm->adc_threshold_3_5v, pm->cfg.wake_voltage);
 }
 
