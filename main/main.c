@@ -346,15 +346,23 @@ void app_main(void)
         return;
     }
 
-    /* ---- 5.1 配置中断驱动 (Data Ready → GPIO 中断 → 信号量) ---- */
+    /* ---- 5.1 配置中断驱动 (共享 EventGroup, 双路对齐) ---- */
     ESP_LOGI(TAG, "配置中断驱动读取...");
+    EventGroupHandle_t imu_drdy_evtgrp = xEventGroupCreate();
+    configASSERT(imu_drdy_evtgrp);
+
     err = icm42688_init_interrupt(&imu_a, PIN_INT_A);
     if (err != ICM42688_OK) {
         ESP_LOGW(TAG, "IMU-A 中断配置失败, 降级为轮询模式");
+    } else {
+        icm42688_set_event_group(&imu_a, imu_drdy_evtgrp, 0);  /* IMU-A → bit 0 */
     }
+
     err = icm42688_init_interrupt(&imu_b, PIN_INT_B);
     if (err != ICM42688_OK) {
         ESP_LOGW(TAG, "IMU-B 中断配置失败, 降级为轮询模式");
+    } else {
+        icm42688_set_event_group(&imu_b, imu_drdy_evtgrp, 1);  /* IMU-B → bit 1 */
     }
 
     /* ---- 6. 双 IMU 交叉校准 ---- */

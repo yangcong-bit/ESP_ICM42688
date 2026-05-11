@@ -531,11 +531,10 @@ static void IRAM_ATTR icm42688_int_isr(void *arg)
     if (dev->int_sem) {
         xSemaphoreGiveFromISR(dev->int_sem, &xHigherPriorityTaskWoken);
     }
-    /* 事件组: 供双路同步 wait_drdy_group 使用 */
+    /* 事件组: 供双路同步 wait_drdy_group 使用
+     * 直接使用 sync_bit_id 映射, 不再基于 GPIO 号模糊计算 */
     if (dev->int_evtgrp) {
-        /* 用 int_gpio 的低位作为事件位 (0=IMU-A, 1=IMU-B) */
-        int bit = (dev->int_gpio == 0) ? 0 : 1;
-        xEventGroupSetBitsFromISR(dev->int_evtgrp, (1 << bit), &xHigherPriorityTaskWoken);
+        xEventGroupSetBitsFromISR(dev->int_evtgrp, (1 << dev->sync_bit_id), &xHigherPriorityTaskWoken);
     }
 
     if (xHigherPriorityTaskWoken) {
@@ -554,14 +553,8 @@ icm42688_err_t icm42688_init_interrupt(icm42688_dev_t *dev, int int_pin)
         return ICM42688_ERR_CONFIG;
     }
 
-    /* 创建事件组 (用于双路同步) */
-    dev->int_evtgrp = xEventGroupCreate();
-    if (!dev->int_evtgrp) {
-        ESP_LOGE(TAG, "Failed to create interrupt event group");
-        vSemaphoreDelete(dev->int_sem);
-        dev->int_sem = NULL;
-        return ICM42688_ERR_CONFIG;
-    }
+    /* 事件组: 由外部(main.c)创建并传入共享句柄 */
+    /* dev->int_evtgrp 和 dev->sync_bit_id 在 icm42688_set_event_group() 中赋值 */
 
     /* 配置 GPIO 为输入, 下降沿触发 */
     gpio_config_t io_conf = {
@@ -617,24 +610,48 @@ uint32_t icm42688_get_int_count(const icm42688_dev_t *dev)
     return dev ? dev->int_count : 0;
 }
 
+void icm42688_set_event_group(icm42688_dev_t *dev, EventGroupHandle_t grp, int bit_id)
+{
+    if (!dev) return;
+    dev->int_evtgrp = grp;
+    dev->sync_bit_id = bit_id;
+}
+
 /* ============================================================
  *  双路 EventGroup 同步等待
  *  同时等待 dev_a 和 dev_b 的中断事件位,
- *  任一路触发即返回, 实现真正的并发等待。
+ *  两路均触发后返回, 实现严格的双路对齐。
  * ============================================================ */
 icm42688_err_t icm42688_wait_drdy_group(icm42688_dev_t *dev_a,
                                           icm42688_dev_t *dev_b,
                                           uint32_t timeout_ms)
 {
     if (!dev_a || !dev_b) return ICM42688_ERR_CONFIG;
-    if (!dev_a->int_evtgrp || !dev_b->int_evtgrp) return ICM42688_ERR_NOT_INIT;
+    if (!dev_a->int_evtgrp) return ICM42688_ERR_NOT_INIT;
 
-    /* 两个事件组各用 bit0, 合并为同一组后同时等待 bit0 | bit1 */
-    EventBits_t bits_a = (1 << 0);  /* IMU-A 的事件位 */
-    EventBits_t bits_b = (1 << 1);  /* IMU-B 的事件位 */
-    EventBits_t wait_bits = bits_a | bits_b;
+    /* 使用 sync_bit_id 精准定位事件位 */
+    EventBits_t wait_bits = (1 << dev_a->sync_bit_id) | (1 << dev_b->sync_bit_id);
 
-    /* 使用 IMU-A 的事件组作为共享组 (两路 ISR 都往同一组写) */
+    /* 共享事件组 (两路 ISR 都往同一组写) */
+    EventGroupHandle_t shared = dev_a->int_evtgrp;
+
+    /* 清除之前的位 */
+    xEventGroupClearBits(shared, wait_bits);
+
+    TickType_t ticks = pdMS_TO_TICKS(timeout_ms);
+    if (timeout_ms == 0 || timeout_ms == UINT32_MAX) ticks = portMAX_DELAY;
+
+    /* 等待两路均触发 (AND) */
+    EventBits_t triggered = xEventGroupWaitBits(shared, wait_bits,
+                                                 pdTRUE,   /* 清除位 */
+                                                 pdTRUE,   /* AND: 两路均满足 */
+                                                 ticks);
+
+    if ((triggered & wait_bits) == wait_bits) {
+        return ICM42688_OK;
+    }
+    return ICM42688_ERR_TIMEOUT;
+}
     EventGroupHandle_t shared = dev_a->int_evtgrp;
 
     /* 清除之前的位, 避免读到旧数据 */

@@ -86,7 +86,8 @@ typedef struct {
     icm42688_axis3f_t    gyro_bias;   /* 陀螺仪偏移校准 (dps) */
     int                  int_gpio;    /* 中断引脚号, -1 = 未配置 */
     SemaphoreHandle_t    int_sem;     /* Data Ready 二值信号量 */
-    EventGroupHandle_t   int_evtgrp;  /* Data Ready 事件组 (双路同步) */
+    EventGroupHandle_t   int_evtgrp;  /* 共享事件组句柄 (双路共用) */
+    int                  sync_bit_id; /* 事件组位 ID (0 或 1) */
     volatile uint32_t    int_count;   /* 中断触发计数 (诊断用) */
     uint8_t             *dma_tx_buf;  /* 预分配 DMA TX 缓冲 (init时分配) */
     uint8_t             *dma_rx_buf;  /* 预分配 DMA RX 缓冲 (init时分配) */
@@ -172,6 +173,14 @@ icm42688_err_t icm42688_wait_read(icm42688_dev_t *dev,
  * @param int_pin  INT1 连接的 ESP32 GPIO 引脚号
  */
 icm42688_err_t icm42688_init_interrupt(icm42688_dev_t *dev, int int_pin);
+
+/**
+ * @brief 绑定共享事件组和位 ID (在 init_interrupt 之后调用)
+ *
+ * 由 main.c 在创建共享 EventGroup 后调用,
+ * 确保两路 IMU 的 ISR 往同一个 EventGroup 的不同位写入。
+ */
+void icm42688_set_event_group(icm42688_dev_t *dev, EventGroupHandle_t grp, int bit_id);
 
 /**
  * @brief 等待 Data Ready 中断 (阻塞, 超时)
