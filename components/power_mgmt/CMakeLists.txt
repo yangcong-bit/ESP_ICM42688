@@ -7,6 +7,8 @@ idf_component_register(
         driver
         esp_timer
         esp_hw_support
+        ulp
         log
         freertos
+        ulp
 )
