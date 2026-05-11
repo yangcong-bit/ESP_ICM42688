@@ -7,7 +7,6 @@ idf_component_register(
         driver
         esp_timer
         esp_hw_support
-        esp_sleep
         log
         freertos
 )
