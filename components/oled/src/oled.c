@@ -106,6 +106,30 @@ oled_err_t oled_init(void)
 {
     ESP_LOGI(TAG, "OLED 初始化...");
 
+    /* ============================================================
+     * [致命冲突检测] ESP32-S3-WROOM-1-N16R8 的 Octal PSRAM 占用
+     * GPIO 33~37。任何 gpio_config / i2c_driver_install 都会断开
+     * MSPI 控制器对 PSRAM 引脚的所有权，导致后续 cache 崩溃
+     * (TG1WDT_SYS_RST at panic_enable_cache)。
+     * 如果 OLED 引脚落在 33~37 范围内，必须立即终止初始化。
+     * ============================================================ */
+    #define PSRAM_GPIO_MIN  33
+    #define PSRAM_GPIO_MAX  37
+    if ((OLED_PIN_PWR_EN >= PSRAM_GPIO_MIN && OLED_PIN_PWR_EN <= PSRAM_GPIO_MAX) ||
+        (OLED_PIN_RES    >= PSRAM_GPIO_MIN && OLED_PIN_RES    <= PSRAM_GPIO_MAX) ||
+        (OLED_PIN_SCL    >= PSRAM_GPIO_MIN && OLED_PIN_SCL    <= PSRAM_GPIO_MAX) ||
+        (OLED_PIN_SDA    >= PSRAM_GPIO_MIN && OLED_PIN_SDA    <= PSRAM_GPIO_MAX)) {
+        ESP_LOGE(TAG, "===========================================================");
+        ESP_LOGE(TAG, "OLED 引脚与 Octal PSRAM 冲突!");
+        ESP_LOGE(TAG, "  PWR_EN=IO%d  RES=IO%d  SCL=IO%d  SDA=IO%d",
+                 OLED_PIN_PWR_EN, OLED_PIN_RES, OLED_PIN_SCL, OLED_PIN_SDA);
+        ESP_LOGE(TAG, "  PSRAM 占用 GPIO %d~%d, 不能用于 OLED!",
+                 PSRAM_GPIO_MIN, PSRAM_GPIO_MAX);
+        ESP_LOGE(TAG, "  请将 OLED 移至 GPIO 0~32 区域 (避开 Flash GPIO 26~32)");
+        ESP_LOGE(TAG, "===========================================================");
+        return OLED_ERR_I2C;  /* 不碰任何 GPIO, 从根源保护 PSRAM */
+    }
+
     /* 1. 电源使能 */
     gpio_config_t pwr_io = {
         .pin_bit_mask = (1ULL << OLED_PIN_PWR_EN),
@@ -121,8 +145,7 @@ oled_err_t oled_init(void)
     /* [F7] 3. 物理阻抗探测 (Bus Sanity Check)
      * 在 i2c_driver_install 之前, 用 GPIO 内部弱下拉 + 外部上拉的
      * 阻抗分压原理嗅探 SDA/SCL 电平, 判定总线上是否存在屏幕。
-     * 无屏时 SDA/SCL 悬空 → 内部下拉拉低 → 检测到低电平 → 安全退出。
-     * 避免裸板引脚悬空时调用 i2c_master_init 触发 TG1WDT_SYS_RST。 */
+     * 无屏时 SDA/SCL 悬空 → 内部下拉拉低 → 检测到低电平 → 安全退出。 */
     ESP_LOGI(TAG, "执行 I2C 总线物理阻抗探测...");
     gpio_config_t probe_io = {
         .pin_bit_mask = (1ULL << OLED_PIN_SDA) | (1ULL << OLED_PIN_SCL),
@@ -166,7 +189,7 @@ oled_err_t oled_init(void)
     vTaskDelay(pdMS_TO_TICKS(20));
     ESP_LOGI(TAG, "RES# 复位序列完成");
 
-    /* 5. I2C 初始化 (此时总线上确认有上拉, 状态机绝不会卡死) */
+    /* 5. I2C 初始化 */
     esp_err_t ret = i2c_master_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "I2C init failed");
