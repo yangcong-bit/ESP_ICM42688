@@ -652,22 +652,3 @@ icm42688_err_t icm42688_wait_drdy_group(icm42688_dev_t *dev_a,
     }
     return ICM42688_ERR_TIMEOUT;
 }
-    EventGroupHandle_t shared = dev_a->int_evtgrp;
-
-    /* 清除之前的位, 避免读到旧数据 */
-    xEventGroupClearBits(shared, wait_bits);
-
-    TickType_t ticks = pdMS_TO_TICKS(timeout_ms);
-    if (timeout_ms == 0 || timeout_ms == UINT32_MAX) ticks = portMAX_DELAY;
-
-    /* 等待: 两路均触发才返回 (AND), 整体超时 2ms 不崩溃 */
-    EventBits_t triggered = xEventGroupWaitBits(shared, wait_bits,
-                                                 pdTRUE,   /* 退出时清除位 */
-                                                 pdTRUE,   /* AND: 两路均满足才返回 */
-                                                 ticks);
-
-    if (triggered == 0) {
-        return ICM42688_ERR_TIMEOUT;
-    }
-    return ICM42688_OK;
-}
