@@ -289,8 +289,8 @@ void app_main(void)
         .wake_voltage        = 3.5f,
         .ldo_en1_gpio        = PIN_LDO_EN1,
         .ldo_en2_gpio        = PIN_LDO_EN2,
-        .oled_pwr_gpio       = 35,
-        .oled_res_gpio       = 36,
+        .oled_pwr_gpio       = OLED_PIN_PWR_EN,  /* IO6 */
+        .oled_res_gpio       = OLED_PIN_RES,     /* IO7 */
         .sleep_cfg = {
             .accel_threshold_g  = 0.05f,
             .gyro_threshold_dps = 1.0f,

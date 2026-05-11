@@ -16,10 +16,10 @@ extern "C" {
 /* ============================================================
  *  引脚定义
  * ============================================================ */
-#define OLED_PIN_PWR_EN    35   /* 电源使能, 高电平使能 */
-#define OLED_PIN_RES       36   /* 硬件复位, 低电平有效 */
-#define OLED_PIN_SCL       37   /* I2C 时钟 */
-#define OLED_PIN_SDA       38   /* I2C 数据 */
+#define OLED_PIN_PWR_EN    6    /* 电源使能, 高电平使能 (避开 PSRAM GPIO 33~37) */
+#define OLED_PIN_RES       7    /* 硬件复位, 低电平有效 */
+#define OLED_PIN_SCL       9    /* I2C 时钟 */
+#define OLED_PIN_SDA       8    /* I2C 数据 */
 #define OLED_I2C_ADDR      0x3C /* 7-bit I2C 地址 */
 #define OLED_I2C_PORT       0   /* I2C_NUM_0 */
 #define OLED_I2C_FREQ   400000  /* 400KHz 快速模式 */
