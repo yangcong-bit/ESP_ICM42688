@@ -14,6 +14,7 @@
 #include "esp_sleep.h"
 #include "driver/gpio.h"
 #include "esp_timer.h"
+#include "ulp_riscv.h"
 #include "rom/ets_sys.h"
 #include <math.h>
 #include <string.h>
@@ -203,7 +204,7 @@ void pm_enter_dead_zone(pm_ctx_t *pm)
     extern volatile uint32_t adc_threshold_3_5v;
     adc_threshold_3_5v = pm->adc_threshold_3_5v;
 
-    /* 6. 启动 ULP */
+    /* 6. 启动 ULP 协处理器 */
     ulp_riscv_run();
 
     /* 7. 进入无限期深睡 */
