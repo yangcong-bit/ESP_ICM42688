@@ -3,8 +3,8 @@
  * @brief 双 ICM-42688-P 融合解算 + ESP-NOW 广播
  *
  * 硬件连接:
- *   IMU-A (SPI2):  SCLK=48 MOSI=47 MISO=21 CS=45 INT1=14 LDO_EN1=4
- *   IMU-B (SPI3):  SCLK=41 MOSI=40 MISO=39 CS=42 INT1=38 LDO_EN2=5
+ *   IMU-A (SPI2):  CS=20 SCLK=19 MOSI=18 MISO=17 INT1=16 LDO_EN1=4
+ *   IMU-B (SPI3):  CS=10 SCLK=11 MOSI=12 MISO=13 INT1=14 LDO_EN2=5
  *
  * 功能:
  *   1. 双路独立 SPI 并发读取
@@ -48,23 +48,25 @@ static const char *TAG = "main";
 #define PIN_LDO_EN2   5      /* IMU-B LDO 使能 */
 
 /* ============================================================
- *  IMU-A 引脚 (SPI2)
+ *  IMU-A 引脚 (SPI2, 根据原理图 2026-F9 重分配)
+ *  全部迁移至 GPIO 16~20, 释放 Flash 引脚 (IO47/IO48)
  * ============================================================ */
-#define PIN_SCLK_A    48
-#define PIN_MOSI_A    47
-#define PIN_MISO_A    21
-#define PIN_CS_A      45
-#define PIN_INT_A     14
+#define PIN_CS_A      20     /* CS1 */
+#define PIN_SCLK_A    19     /* SPI_CLK_A */
+#define PIN_MOSI_A    18     /* SPI_MOSI_A */
+#define PIN_MISO_A    17     /* SPI_MISO_A */
+#define PIN_INT_A     16     /* INT1_A */
 #define SPI_HOST_A    SPI2_HOST
 
 /* ============================================================
- *  IMU-B 引脚 (SPI3)
+ *  IMU-B 引脚 (SPI3, 根据原理图 2026-F9 重分配)
+ *  全部迁移至 GPIO 10~14, 与 IMU-A 物理隔离
  * ============================================================ */
-#define PIN_SCLK_B    41
-#define PIN_MOSI_B    40
-#define PIN_MISO_B    39
-#define PIN_CS_B      42
-#define PIN_INT_B     38
+#define PIN_CS_B      10     /* CS2 */
+#define PIN_SCLK_B    11     /* SPI_CLK_B */
+#define PIN_MOSI_B    12     /* SPI_MOSI_B */
+#define PIN_MISO_B    13     /* SPI_MISO_B */
+#define PIN_INT_B     14     /* INT1_B */
 #define SPI_HOST_B    SPI3_HOST
 
 /* 节点 ID: 启动时从 MAC 地址低位自动推演, 无需硬编码 */
