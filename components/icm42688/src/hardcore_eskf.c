@@ -32,8 +32,8 @@ void IRAM_ATTR eskf_predict(eskf_t *eskf, eskf_nominal_state_t *nominal, const f
     nominal->q[2] += half_dt * ( q_z*wx + q_w*wy - q_x*wz);
     nominal->q[3] += half_dt * (-q_y*wx + q_x*wy + q_w*wz);
 
-    /* 归一化 (SIMD: dsps_normf_ext) */
-    float q_buf[4] = { nominal->q[0], nominal->q[1], nominal->q[2], nominal->q[3] };
+    /* 归一化 */
+    ALIGN_16 float q_buf[4] = { nominal->q[0], nominal->q[1], nominal->q[2], nominal->q[3] };
     float qn = sqrtf(q_buf[0]*q_buf[0] + q_buf[1]*q_buf[1] + q_buf[2]*q_buf[2] + q_buf[3]*q_buf[3]);
     if (qn > 1e-8f) {
         float inv_n = 1.0f / qn;
@@ -41,19 +41,19 @@ void IRAM_ATTR eskf_predict(eskf_t *eskf, eskf_nominal_state_t *nominal, const f
         nominal->q[2] *= inv_n; nominal->q[3] *= inv_n;
     }
 
-    /* 构建 F (6x6) */
-    float F[6][6] = {0};
+    /* 构建 F (6x6), 强制 16 字节对齐 */
+    ALIGN_16 float F[6][6] = {0};
     for (int i = 0; i < 6; i++) F[i][i] = 1.0f;
     F[0][1] =  wz * dt;  F[0][2] = -wy * dt;  F[0][3] = -dt;
     F[1][0] = -wz * dt;  F[1][2] =  wx * dt;  F[1][4] = -dt;
     F[2][0] =  wy * dt;  F[2][1] = -wx * dt;  F[2][5] = -dt;
 
-    /* P_next = F * P (SIMD 矩阵乘) */
-    float P_next[6][6];
+    /* P_next = F * P (SIMD 矩阵乘, 对齐) */
+    ALIGN_16 float P_next[6][6];
     dspm_mult_f32((float *)F, (float *)eskf->P, (float *)P_next, 6, 6, 6);
 
-    /* F^T */
-    float F_T[6][6];
+    /* F^T (对齐) */
+    ALIGN_16 float F_T[6][6];
     for (int i = 0; i < 6; i++)
         for (int j = 0; j < 6; j++)
             F_T[i][j] = F[j][i];
@@ -96,18 +96,18 @@ void IRAM_ATTR eskf_update_accel(eskf_t *eskf, eskf_nominal_state_t *nominal, co
 
     float y[3] = { z[0] - g_pred[0], z[1] - g_pred[1], z[2] - g_pred[2] };
 
-    float H[3][6] = {
+    ALIGN_16 float H[3][6] = {
         { 0.0f,      -g_pred[2],  g_pred[1], 0.0f, 0.0f, 0.0f },
         { g_pred[2],  0.0f,      -g_pred[0], 0.0f, 0.0f, 0.0f },
         {-g_pred[1],  g_pred[0],  0.0f,      0.0f, 0.0f, 0.0f }
     };
 
     for (int axis = 0; axis < 3; axis++) {
-        float h_row[6];
+        ALIGN_16 float h_row[6];
         for (int j = 0; j < 6; j++) h_row[j] = H[axis][j];
 
-        /* PHt = P * H^T: 逐行点积 (SIMD) */
-        float PHt[6];
+        /* PHt = P * H^T: 逐行点积 (SIMD, 对齐) */
+        ALIGN_16 float PHt[6];
         for (int i = 0; i < 6; i++) {
             dsps_dotprod_f32(&eskf->P[i][0], h_row, &PHt[i], 6);
         }
@@ -117,9 +117,9 @@ void IRAM_ATTR eskf_update_accel(eskf_t *eskf, eskf_nominal_state_t *nominal, co
         dsps_dotprod_f32(h_row, PHt, &s_tmp, 6);
         float S = eskf->noise_accel + s_tmp;
 
-        /* K = PHt / S */
+        /* K = PHt / S (对齐) */
         float inv_S = 1.0f / S;
-        float K[6];
+        ALIGN_16 float K[6];
         for (int i = 0; i < 6; i++) K[i] = PHt[i] * inv_S;
 
         /* innovation = y - H * dx (SIMD 点积) */
@@ -156,8 +156,8 @@ void IRAM_ATTR eskf_update_accel(eskf_t *eskf, eskf_nominal_state_t *nominal, co
     nominal->q[2] = q0*dq[2] - q1*dq[3] + q2*dq[0] + q3*dq[1];
     nominal->q[3] = q0*dq[3] + q1*dq[2] - q2*dq[1] + q3*dq[0];
 
-    /* 归一化 (SIMD) */
-    float q_buf[4] = { nominal->q[0], nominal->q[1], nominal->q[2], nominal->q[3] };
+    /* 归一化 */
+    ALIGN_16 float q_buf[4] = { nominal->q[0], nominal->q[1], nominal->q[2], nominal->q[3] };
     float qn = sqrtf(q_buf[0]*q_buf[0] + q_buf[1]*q_buf[1] + q_buf[2]*q_buf[2] + q_buf[3]*q_buf[3]);
     if (qn > 1e-8f) {
         float inv_n = 1.0f / qn;

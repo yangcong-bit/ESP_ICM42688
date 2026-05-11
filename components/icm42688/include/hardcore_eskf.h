@@ -5,6 +5,11 @@
 #include <math.h>
 #include "esp_attr.h"
 
+/* 强制 16 字节对齐，满足 ESP32-S3 PIE 128-bit SIMD 总线要求 */
+#ifndef ALIGN_16
+#define ALIGN_16 __attribute__((aligned(16)))
+#endif
+
 /* 强制 16 字节对齐，利用 Xtensa 核心的总线带宽 */
 typedef struct {
     float q[4];      // 标称四元数 [w, x, y, z]
