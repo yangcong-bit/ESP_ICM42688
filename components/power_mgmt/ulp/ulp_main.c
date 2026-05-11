@@ -15,10 +15,11 @@
 #include "ulp_riscv_adc_ulp_core.h"
 #include "hal/adc_types.h"
 
-/* 共享变量 (主核写入, ULP 只读) */
-volatile uint32_t ulp_adc_threshold_3_5v;  /* 3.5V 对应的 ADC 原始值 */
-volatile uint32_t ulp_wake_count;          /* 唤醒次数 (诊断) */
-volatile uint32_t ulp_adc_reading;         /* 最近 ADC 读数 (调试) */
+/* [修复链接错误] 必须初始化为 0! 强制编译器存入 .bss 段,
+ * 确保符号能被 mapgen 工具正确识别并导出给主核 */
+volatile uint32_t adc_threshold_3_5v = 0;   /* 3.5V 对应的 ADC 原始值 (主核写入, mapgen 导出为 ulp_adc_threshold_3_5v) */
+volatile uint32_t ulp_wake_count = 0;          /* 唤醒次数 (诊断) */
+volatile uint32_t ulp_adc_reading = 0;         /* 最近 ADC 读数 (调试) */
 
 int main(void)
 {
@@ -33,7 +34,7 @@ int main(void)
     ulp_adc_reading = adc_avg;
 
     /* 迟滞判断: 电压 ≥ 3.5V → 唤醒主核 */
-    if (adc_avg >= ulp_adc_threshold_3_5v) {
+    if (adc_avg >= adc_threshold_3_5v) {
         ulp_wake_count++;
         ulp_riscv_wakeup_main_processor();
     }

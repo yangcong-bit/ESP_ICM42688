@@ -421,8 +421,9 @@ void app_main(void)
     xTaskCreate(oled_task, "oled_task", 4096, NULL, 2, NULL);
     ESP_LOGI(TAG, "oled_task 已创建 (优先级2, 10Hz 刷新)");
 
-    /* app_main 释放 CPU, 不再占用 */
+    /* [致命 Bug 4 修复] 释放 Core 0, 防止触发 Task Watchdog Panic (TWDT)
+     * 死循环必须让出时间片给 IDLE 任务, 否则内存无法回收, 触发看门狗重启 */
     while (1) {
-        // vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }

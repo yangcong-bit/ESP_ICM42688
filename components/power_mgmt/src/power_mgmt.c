@@ -15,6 +15,7 @@
 #include "driver/gpio.h"
 #include "esp_timer.h"
 #include "ulp_riscv.h"
+#include "power_mgmt_ulp.h"  /* [修复] 构建系统自动生成的 ULP 共享符号头文件 */
 #include "rom/ets_sys.h"
 #include <math.h>
 #include <string.h>
@@ -201,8 +202,7 @@ void pm_enter_dead_zone(pm_ctx_t *pm)
     pm->ulp_active = true;
 
     /* 5. 设置 ULP ADC 阈值 (共享 RTC 内存) */
-    extern volatile uint32_t ulp_adc_threshold_3_5v;
-    ulp_adc_threshold_3_5v = pm->adc_threshold_3_5v;
+    ulp_adc_threshold_3_5v = pm->adc_threshold_3_5v;  /* 来自 ulp_power_mgmt_ulp.h */
 
     /* 6. 启动 ULP 协处理器 */
     ulp_riscv_run();
@@ -244,9 +244,8 @@ void pm_ulp_init(pm_ctx_t *pm, int adc_raw_threshold)
 
     pm->adc_threshold_3_5v = (uint32_t)adc_raw_threshold;
 
-    /* 配置 ULP 可使用的 ADC 通道 (GPIO2 → ADC1_CH1) */
-    extern volatile uint32_t ulp_adc_threshold_3_5v;
-    ulp_adc_threshold_3_5v = pm->adc_threshold_3_5v;
+    /* 设置 ULP ADC 阈值 (GPIO2 → ADC1_CH1) */
+    ulp_adc_threshold_3_5v = pm->adc_threshold_3_5v;  /* 来自 ulp_power_mgmt_ulp.h */
 
     /* ULP Timer: 每 1 秒唤醒一次 */
     ulp_set_wakeup_period(0, 1000000);
