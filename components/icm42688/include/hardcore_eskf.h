@@ -18,7 +18,11 @@ typedef struct {
 
 typedef struct {
     float dx[6];     // 误差状态：[角度误差x, y, z, 零偏误差x, y, z]
-    float P[6][6];   // 6x6 协方差矩阵
+
+    /* [F15 Task 2.1] P[6][8]: 每行 32 字节 (8×4), 保证所有行首地址 16 字节对齐
+     * ESP32-S3 PIE 128-bit SIMD 要求操作数 16 字节对齐。
+     * 算法中访问 P[i][j] 时, 循环仍使用 j < 6, 仅 padding 区域不使用。 */
+    float P[6][8];   // 6x8 协方差矩阵 (有效区域 6x6, 每行 padding 2 float)
     
     // 系统噪声矩阵参数 (Q)
     float noise_gyro;

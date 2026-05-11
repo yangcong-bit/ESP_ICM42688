@@ -86,8 +86,10 @@ typedef struct {
     icm42688_axis3f_t    gyro_bias;   /* 陀螺仪偏移校准 (dps) */
     int                  int_gpio;    /* 中断引脚号, -1 = 未配置 */
     SemaphoreHandle_t    int_sem;     /* Data Ready 二值信号量 */
-    EventGroupHandle_t   int_evtgrp;  /* 共享事件组句柄 (双路共用) */
-    int                  sync_bit_id; /* 事件组位 ID (0 或 1) */
+    EventGroupHandle_t   int_evtgrp;  /* [兼容] 共享事件组句柄 */
+    int                  sync_bit_id; /* [兼容] 事件组位 ID */
+    TaskHandle_t         notify_task; /* [F15 Task 2.2] 目标通知任务 */
+    int                  notify_bit;  /* [F15 Task 2.2] 通知位掩码 (bit0=IMU-A, bit1=IMU-B) */
     volatile uint32_t    int_count;   /* 中断触发计数 (诊断用) */
     uint8_t             *dma_tx_buf;  /* 预分配 DMA TX 缓冲 (init时分配) */
     uint8_t             *dma_rx_buf;  /* 预分配 DMA RX 缓冲 (init时分配) */
@@ -181,6 +183,18 @@ icm42688_err_t icm42688_init_interrupt(icm42688_dev_t *dev, int int_pin);
  * 确保两路 IMU 的 ISR 往同一个 EventGroup 的不同位写入。
  */
 void icm42688_set_event_group(icm42688_dev_t *dev, EventGroupHandle_t grp, int bit_id);
+
+/**
+ * @brief [F15 Task 2.2] 绑定 Direct Task Notification 目标
+ *
+ * 替代 EventGroup 的零开销方案: ISR 通过 xTaskNotifyIndexedFromISR
+ * 直接通知目标任务, 消除 EventGroup 的微秒级抖动。
+ *
+ * @param dev    IMU 设备句柄
+ * @param task   目标任务句柄 (imu_task)
+ * @param bit    通知位掩码 (IMU-A=bit0=1, IMU-B=bit1=2)
+ */
+void icm42688_set_notify_target(icm42688_dev_t *dev, TaskHandle_t task, int bit);
 
 /**
  * @brief 等待 Data Ready 中断 (阻塞, 超时)

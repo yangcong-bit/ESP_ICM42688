@@ -157,9 +157,11 @@ void pm_enter_wom_sleep(pm_ctx_t *pm)
     /* 2. 通过 SPI 让 IMU 进入 WoM 模式 (需要外部调用) */
     /* 此处预留接口, 实际由主核在调用前完成 IMU WoM 配置 */
 
-    /* 3. 配置 RTC GPIO 唤醒 (IMU INT1 引脚) */
+    /* 3. 配置 RTC GPIO 唤醒 (IMU INT1 引脚)
+     * [F15 Task 1.2] 改为高电平唤醒: ICM-42688-P INT1 为 Active-High,
+     * 原低电平设置会导致静止状态立刻触发唤醒 (秒醒死循环) */
     if (pm->cfg.sleep_cfg.wake_gpio > 0) {
-        esp_sleep_enable_ext0_wakeup(pm->cfg.sleep_cfg.wake_gpio, 0);  /* 低电平唤醒 */
+        esp_sleep_enable_ext0_wakeup(pm->cfg.sleep_cfg.wake_gpio, 1);
     }
 
     /* 4. 禁用 WiFi (ESP-NOW 在深睡时自动关闭) */

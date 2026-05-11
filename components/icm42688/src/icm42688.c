@@ -559,8 +559,14 @@ static void IRAM_ATTR icm42688_int_isr(void *arg)
     if (dev->int_sem) {
         xSemaphoreGiveFromISR(dev->int_sem, &xHigherPriorityTaskWoken);
     }
-    /* 事件组: 供双路同步 wait_drdy_group 使用
-     * 直接使用 sync_bit_id 映射, 不再基于 GPIO 号模糊计算 */
+    /* [F15 Task 2.2] Direct Task Notification: 零开销通知目标任务
+     * 替代 EventGroup, 消除 ISR→Task 的微秒级抖动 */
+    if (dev->notify_task) {
+        xTaskNotifyIndexedFromISR(dev->notify_task, 0,
+                                  dev->notify_bit, eSetBits,
+                                  &xHigherPriorityTaskWoken);
+    }
+    /* [兼容] 保留 EventGroup 路径 */
     if (dev->int_evtgrp) {
         xEventGroupSetBitsFromISR(dev->int_evtgrp, (1 << dev->sync_bit_id), &xHigherPriorityTaskWoken);
     }
@@ -645,6 +651,14 @@ void icm42688_set_event_group(icm42688_dev_t *dev, EventGroupHandle_t grp, int b
     dev->sync_bit_id = bit_id;
 }
 
+/* [F15 Task 2.2] Direct Task Notification 绑定 */
+void icm42688_set_notify_target(icm42688_dev_t *dev, TaskHandle_t task, int bit)
+{
+    if (!dev) return;
+    dev->notify_task = task;
+    dev->notify_bit  = bit;
+}
+
 /* ============================================================
  *  双路 EventGroup 同步等待
  *  同时等待 dev_a 和 dev_b 的中断事件位,
@@ -655,28 +669,43 @@ icm42688_err_t icm42688_wait_drdy_group(icm42688_dev_t *dev_a,
                                           uint32_t timeout_ms)
 {
     if (!dev_a || !dev_b) return ICM42688_ERR_CONFIG;
+
+    /* [F15 Task 2.2] Direct Task Notification 路径 (优先, 零开销) */
+    if (dev_a->notify_task && dev_b->notify_task) {
+        uint32_t notify_mask = dev_a->notify_bit | dev_b->notify_bit;
+        uint32_t notified = 0;
+        TickType_t ticks = pdMS_TO_TICKS(timeout_ms);
+        if (timeout_ms == 0 || timeout_ms == UINT32_MAX) ticks = portMAX_DELAY;
+
+        xTaskNotifyWaitIndexed(0, 0, notify_mask, &notified, ticks);
+
+        if ((notified & notify_mask) == notify_mask) {
+            return ICM42688_OK;
+        }
+        /* 超时: 清除残留通知位, 防止鬼影帧污染下一周期 */
+        xTaskNotifyStateClearIndexed(dev_a->notify_task, 0);
+        return ICM42688_ERR_TIMEOUT;
+    }
+
+    /* [兼容] EventGroup 路径 */
     if (!dev_a->int_evtgrp) return ICM42688_ERR_NOT_INIT;
 
-    /* 使用 sync_bit_id 精准定位事件位 */
     EventBits_t wait_bits = (1 << dev_a->sync_bit_id) | (1 << dev_b->sync_bit_id);
-
-    /* 共享事件组 (两路 ISR 都往同一组写) */
     EventGroupHandle_t shared = dev_a->int_evtgrp;
 
-    /* 清除之前的位 */
     xEventGroupClearBits(shared, wait_bits);
 
     TickType_t ticks = pdMS_TO_TICKS(timeout_ms);
     if (timeout_ms == 0 || timeout_ms == UINT32_MAX) ticks = portMAX_DELAY;
 
-    /* 等待两路均触发 (AND) */
     EventBits_t triggered = xEventGroupWaitBits(shared, wait_bits,
-                                                 pdTRUE,   /* 清除位 */
-                                                 pdTRUE,   /* AND: 两路均满足 */
-                                                 ticks);
+                                                 pdTRUE, pdTRUE, ticks);
 
     if ((triggered & wait_bits) == wait_bits) {
         return ICM42688_OK;
     }
+
+    /* [F15 Task 1.1] 鬼影帧修复: 超时后强制清除残留位 */
+    xEventGroupClearBits(shared, wait_bits);
     return ICM42688_ERR_TIMEOUT;
 }

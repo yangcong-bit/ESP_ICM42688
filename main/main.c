@@ -467,8 +467,16 @@ void app_main(void)
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], s_node_id);
 
     /* ---- 8. 创建高优先级 IMU 采集任务 (Core1, 优先级15) ---- */
-    xTaskCreatePinnedToCore(imu_task, "imu_task", 8192, &dual_dev, 15, NULL, 1);
+    TaskHandle_t imu_task_handle = NULL;
+    xTaskCreatePinnedToCore(imu_task, "imu_task", 8192, &dual_dev, 15, &imu_task_handle, 1);
     ESP_LOGI(TAG, "imu_task 已创建 (Core1, 优先级15, 栈8KB)");
+
+    /* [F15 Task 2.2] 绑定 Direct Task Notification: ISR→Task 零开销通知 */
+    if (!s_imu_hardware_missing) {
+        icm42688_set_notify_target(&dual_dev.imu[0].dev[0], imu_task_handle, 1);  /* bit0 = IMU-A */
+        icm42688_set_notify_target(&dual_dev.imu[1].dev[0], imu_task_handle, 2);  /* bit1 = IMU-B */
+        ESP_LOGI(TAG, "Task Notification 已绑定 (IMU-A→bit0, IMU-B→bit1)");
+    }
 
     /* 条件创建 OLED 显示任务 (无屏模式下省 4KB 栈 + CPU 开销) */
     if (is_oled_ready) {

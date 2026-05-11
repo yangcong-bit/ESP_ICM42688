@@ -18,7 +18,10 @@ void eskf_init(eskf_t *eskf, eskf_nominal_state_t *nominal) {
 }
 
 /* 预测步: P = F * P * F^T + Q (SIMD 加速) */
-void IRAM_ATTR eskf_predict(eskf_t *eskf, eskf_nominal_state_t *nominal, const float gyro[3], float dt) {
+/* [F15 Task 2.3] 移除 IRAM_ATTR: sqrtf() 调用 Flash 中的标准库,
+ * 若 Cache 关闭 (Flash 擦写) 会触发 Cache Panic。
+ * 依赖 -O3 指令 Cache 即可, 不需要常驻 IRAM。 */
+void eskf_predict(eskf_t *eskf, eskf_nominal_state_t *nominal, const float gyro[3], float dt) {
     float wx = gyro[0] - nominal->bg[0];
     float wy = gyro[1] - nominal->bg[1];
     float wz = gyro[2] - nominal->bg[2];
@@ -48,9 +51,15 @@ void IRAM_ATTR eskf_predict(eskf_t *eskf, eskf_nominal_state_t *nominal, const f
     F[1][0] = -wz * dt;  F[1][2] =  wx * dt;  F[1][4] = -dt;
     F[2][0] =  wy * dt;  F[2][1] = -wx * dt;  F[2][5] = -dt;
 
+    /* [F15 Task 2.1] P[6][8] stride 修正: dspm_mult_f32 需要连续 6 列数据,
+     * 但 P 每行有 8 列 (padding). 先拷贝到局部 6×6 缓冲再做矩阵乘。 */
+    ALIGN_16 float P_flat[6][6];
+    for (int i = 0; i < 6; i++)
+        memcpy(P_flat[i], eskf->P[i], 6 * sizeof(float));
+
     /* P_next = F * P (SIMD 矩阵乘, 对齐) */
     ALIGN_16 float P_next[6][6];
-    dspm_mult_f32((float *)F, (float *)eskf->P, (float *)P_next, 6, 6, 6);
+    dspm_mult_f32((float *)F, (float *)P_flat, (float *)P_next, 6, 6, 6);
 
     /* F^T (对齐) */
     ALIGN_16 float F_T[6][6];
@@ -59,7 +68,11 @@ void IRAM_ATTR eskf_predict(eskf_t *eskf, eskf_nominal_state_t *nominal, const f
             F_T[i][j] = F[j][i];
 
     /* P = P_next * F^T (SIMD 矩阵乘) */
-    dspm_mult_f32((float *)P_next, (float *)F_T, (float *)eskf->P, 6, 6, 6);
+    dspm_mult_f32((float *)P_next, (float *)F_T, (float *)P_flat, 6, 6, 6);
+
+    /* 写回 P[6][8] (仅前 6 列) */
+    for (int i = 0; i < 6; i++)
+        memcpy(eskf->P[i], P_flat[i], 6 * sizeof(float));
 
     /* 过程噪声 Q */
     float dt2 = dt * dt;
@@ -78,7 +91,8 @@ void IRAM_ATTR eskf_predict(eskf_t *eskf, eskf_nominal_state_t *nominal, const f
 }
 
 /* 更新步: 序贯更新 (SIMD 加速) */
-void IRAM_ATTR eskf_update_accel(eskf_t *eskf, eskf_nominal_state_t *nominal, const float accel[3]) {
+/* [F15 Task 2.3] 移除 IRAM_ATTR (同上, sqrtf 依赖 Flash Cache) */
+void eskf_update_accel(eskf_t *eskf, eskf_nominal_state_t *nominal, const float accel[3]) {
     if (isnan(accel[0]) || isnan(accel[1]) || isnan(accel[2])) return;
     float a_norm = sqrtf(accel[0]*accel[0] + accel[1]*accel[1] + accel[2]*accel[2]);
     if (a_norm < 0.1f) return;
