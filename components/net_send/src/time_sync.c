@@ -150,6 +150,30 @@ bool time_sync_is_valid(const time_sync_state_t *state)
     return (now - state->last_sync_local_us) < SYNC_TIMEOUT_US;
 }
 
+int64_t time_sync_us_until_next_slot(time_sync_state_t *state)
+{
+    if (!state || !state->tdma_enabled || !state->synchronized) {
+        return 0;  /* 未启用/未同步 → 立即发送 */
+    }
+
+    /* 获取同步后的全局时间 */
+    int64_t now_us = time_sync_get_time(state);
+    uint32_t phase_us = (uint32_t)((uint64_t)now_us % state->tdma_period_us);
+
+    int64_t wait_us;
+    if (phase_us <= state->tdma_offset_us) {
+        /* 本节点时隙还没到 */
+        wait_us = (int64_t)state->tdma_offset_us - phase_us;
+    } else if (phase_us < (state->tdma_offset_us + state->tdma_window_us)) {
+        /* 正在本节点时隙内 */
+        wait_us = 0;
+    } else {
+        /* 本节点时隙已过, 等下一个周期 */
+        wait_us = (int64_t)state->tdma_period_us - phase_us + state->tdma_offset_us;
+    }
+    return wait_us;
+}
+
 /* ============================================================
  *  主机端 API
  * ============================================================ */

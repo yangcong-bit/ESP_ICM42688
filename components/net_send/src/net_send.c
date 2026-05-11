@@ -17,6 +17,7 @@
 #include "esp_netif.h"
 #include "esp_event.h"
 #include "esp_rom_sys.h"
+#include "esp_timer.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -71,9 +72,27 @@ static void espnow_send_task(void *arg)
         }
         /* 其次处理 IMU 聚合数据 (TDMA 时隙控制) */
         if (xQueueReceive(s_imu_send_queue, &imu_pkt, pdMS_TO_TICKS(10)) == pdTRUE) {
-            /* TDMA: 自旋等待直到进入本节点微时隙 */
-            while (!time_sync_is_my_slot(&s_time_sync)) {
-                esp_rom_delay_us(50);  /* 50μs 粒度轮询, 防死锁 */
+            /* TDMA: 混合调度 (Hybrid Sleep-Spin)
+             * > 2ms: vTaskDelay 挂起, 释放 Core 0 让 PM 切 80MHz Idle
+             * < 2ms: esp_rom_delay_us 微秒级自旋, 保证时隙精度不撕裂 */
+            while (1) {
+                int64_t wait_us = time_sync_us_until_next_slot(&s_time_sync);
+
+                /* 已在时隙内或未同步 → 立即发送 */
+                if (wait_us <= 0) break;
+
+                if (wait_us > 2000) {
+                    /* 粗调: 距离时隙较远, 让出 CPU 给 IDLE 任务 */
+                    uint32_t delay_ticks = pdMS_TO_TICKS((wait_us - 1000) / 1000);
+                    if (delay_ticks > 0) {
+                        vTaskDelay(delay_ticks);
+                    } else {
+                        taskYIELD();
+                    }
+                } else {
+                    /* 微调: 距离时隙 <2ms, 高精度自旋防抖 */
+                    esp_rom_delay_us(50);
+                }
             }
             esp_now_send(s_broadcast_mac, imu_pkt.data, imu_pkt.data_len);
         }

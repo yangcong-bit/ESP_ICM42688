@@ -124,6 +124,17 @@ void time_sync_set_tdma(time_sync_state_t *state, bool enable,
  */
 bool time_sync_is_my_slot(time_sync_state_t *state);
 
+/**
+ * @brief 计算距离下一个本节点 TDMA 时隙的微秒数
+ *
+ * 返回值:
+ *   > 0  距离下一个时隙的等待时间 (μs)
+ *   ≤ 0  已经在时隙内或未同步 (应立即发送)
+ *
+ * 用于混合调度: 粗调 vTaskDelay (>2ms) + 微调 esp_rom_delay_us (<2ms)
+ */
+int64_t time_sync_us_until_next_slot(time_sync_state_t *state);
+
 /* ============================================================
  *  主机端 API (RK3566/PC, 仅做参考)
  * ============================================================ */
