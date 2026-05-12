@@ -18,6 +18,8 @@
 #include "esp_now.h"
 #include "esp_event.h"
 #include "esp_timer.h"
+#include "nvs_flash.h"
+#include "esp_netif.h"
 
 static const char *TAG = "master";
 
@@ -48,16 +50,14 @@ typedef struct __attribute__((packed)) {
     uint8_t  enable;         /* 1=开启, 0=关闭 */
 } timesync_tdma_cfg_pkt_t;
 
-/* IMU 聚合帧结构 (与节点端一致) */
+/* IMU 聚合帧结构 (与节点端 net_frame_t 严格对齐: 48 Bytes) */
 #define NET_AGGREGATE_FRAMES  5
 typedef struct __attribute__((packed)) {
-    float    accel[3];
-    float    gyro[3];
-    float    quat[4];
-    float    euler[3];
-    float    temp;
-    uint64_t timestamp_us;
-} net_frame_t;
+    float    accel[3];        /* 加速度 (g)          12B */
+    float    gyro[3];         /* 陀螺仪 (dps)        12B */
+    float    quat[4];         /* 四元数 [w,x,y,z]    16B */
+    uint64_t timestamp_us;    /* 全局同步时间戳 (μs)  8B */
+} net_frame_t;  /* 总计 48 bytes */
 
 typedef struct __attribute__((packed)) {
     uint8_t  magic[4];
@@ -150,27 +150,9 @@ static void espnow_recv_cb(const esp_now_recv_info_t *info,
  * ============================================================ */
 static void master_ctrl_task(void *arg)
 {
-    ESP_LOGI(TAG, "Master Ctrl: 广播 TDMA 配置 + 时钟同步...");
+    ESP_LOGI(TAG, "Master Ctrl: 开始周期时钟同步 (1Hz)...");
 
-    /* 1. 启动时连续广播 TDMA 配置 (确保节点收到) */
-    timesync_tdma_cfg_pkt_t tdma_cfg = {
-        .type      = TIMESYNC_TDMA_CFG,
-        .node_id   = 0xFF,       /* 广播给所有节点 */
-        .period_us = 5000,       /* 200Hz 周期 */
-        .offset_us = 0,          /* 节点端自动按 node_id 计算 */
-        .window_us = 350,        /* 发送窗口 */
-        .enable    = 1           /* 开启 TDMA */
-    };
-
-    for (int i = 0; i < 5; i++) {
-        esp_now_send(s_broadcast_mac, (const uint8_t *)&tdma_cfg, sizeof(tdma_cfg));
-        ESP_LOGI(TAG, "TDMA CFG 广播 #%d (200Hz, 350us窗口)", i + 1);
-        vTaskDelay(pdMS_TO_TICKS(200));
-    }
-
-    ESP_LOGI(TAG, "TDMA 配置下发完成, 开始周期时钟同步 (1Hz)...");
-
-    /* 2. 周期性广播 SYNC_START (1Hz) */
+    /* 周期性广播 SYNC_START (1Hz) */
     while (1) {
         s_host.seq++;
         s_host.last_sync_us = esp_timer_get_time();
@@ -202,11 +184,33 @@ static void master_ctrl_task(void *arg)
  * ============================================================ */
 static void wifi_init(void)
 {
+    /* 1. NVS 初始化 (WiFi PHY 射频校准数据强依赖) */
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    /* 2. 底层网络接口 + 事件循环 */
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    /* 3. WiFi 硬件引擎 */
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_start());
 
+    /* 4. PHY 速率 24Mbps: 与节点端对等, 防止 Master 慢速包占用信道 */
+    esp_err_t rate_err = esp_wifi_config_espnow_rate(WIFI_IF_STA, WIFI_PHY_RATE_24M);
+    if (rate_err == ESP_OK) {
+        ESP_LOGI(TAG, "ESP-NOW PHY Rate: 24Mbps");
+    } else {
+        ESP_LOGW(TAG, "PHY Rate 提速失败: %s", esp_err_to_name(rate_err));
+    }
+
+    /* 获取 MAC */
     uint8_t mac[6];
     esp_wifi_get_mac(WIFI_IF_STA, mac);
     ESP_LOGI(TAG, "Master MAC: %02X:%02X:%02X:%02X:%02X:%02X",
