@@ -106,11 +106,15 @@ static void espnow_send_task(void *arg)
                 if (wait_us <= 0) break;  /* 已在时隙内 */
 
                 if (wait_us > 2000 && s_tdma_timer) {
-                    /* 粗调: esp_timer 精确等待, 任务完全阻塞 */
+                    /* 粗调: esp_timer 精确等待, 提前 500μs 唤醒 */
                     esp_timer_start_once(s_tdma_timer, (uint64_t)(wait_us - 500));
                     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
                 } else {
-                    /* 微调: 距离时隙 <2ms, 直接发送 (误差可接受) */
+                    /* 微调: 距离时隙 <2ms, ROM 延时精确踩点
+                     * 补齐 esp_timer 提前唤醒的 ~500μs 余量, 精准对齐时隙 */
+                    if (wait_us > 0) {
+                        esp_rom_delay_us((uint32_t)wait_us);
+                    }
                     break;
                 }
             }

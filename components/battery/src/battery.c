@@ -136,35 +136,33 @@ float battery_get_voltage(void)
 /* ============================================================
  *  API — 电池电量百分比
  *
- *  简易锂电池放电曲线映射:
- *    4.2V = 100%
- *    3.95V = 75%
- *    3.7V  = 50%
- *    3.5V  = 25%
- *    3.3V  = 0%
+ *  查表法 (LUT) 映射真实锂电池放电曲线:
+ *  4.2V 聚合物电池在 3.7~3.9V 有极长放电平台期,
+ *  线性插值会导致 80%~40% 掉电过快, LUT 修正此问题。
  * ============================================================ */
 uint8_t battery_get_percentage(void)
 {
     float v = battery_get_voltage();
-    float mv = v * 1000.0f;
 
-    if (mv >= BAT_FULL_MV)  return 100;
-    if (mv <= BAT_EMPTY_MV) return 0;
+    /* 锂电池放电曲线查表: 电压(V) → 电量(%) */
+    static const struct { float v; uint8_t pct; } lut[] = {
+        { 4.15f, 100 }, { 4.05f, 90 }, { 3.95f, 80 },
+        { 3.88f, 70 }, { 3.82f, 60 }, { 3.78f, 50 },
+        { 3.74f, 40 }, { 3.70f, 30 }, { 3.65f, 20 },
+        { 3.55f, 10 }, { 3.45f,  5 }, { 3.35f,  0 },
+    };
+    int n = sizeof(lut) / sizeof(lut[0]);
 
-    /* 线性插值: 3300~4200mV → 0~100% */
-    float pct = (mv - BAT_EMPTY_MV) / (BAT_FULL_MV - BAT_EMPTY_MV) * 100.0f;
+    /* 超出范围处理 */
+    if (v >= lut[0].v) return lut[0].pct;
+    if (v <= lut[n-1].v) return lut[n-1].pct;
 
-    /* 简单非线性修正: 锂电池中间段平坦, 两端陡峭 */
-    if (pct > 80.0f) {
-        /* 80~100%: 缓慢下降 */
-        pct = 80.0f + (pct - 80.0f) * 0.5f;
-    } else if (pct < 20.0f) {
-        /* 0~20%: 快速下降 */
-        pct = pct * 0.8f;
+    /* 查表插值 */
+    for (int i = 0; i < n - 1; i++) {
+        if (v >= lut[i+1].v) {
+            float ratio = (v - lut[i+1].v) / (lut[i].v - lut[i+1].v);
+            return lut[i+1].pct + (uint8_t)(ratio * (lut[i].pct - lut[i+1].pct));
+        }
     }
-
-    if (pct > 100.0f) pct = 100.0f;
-    if (pct < 0.0f) pct = 0.0f;
-
-    return (uint8_t)pct;
+    return 0;
 }

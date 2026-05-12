@@ -155,6 +155,20 @@ void pm_enter_wom_sleep(pm_ctx_t *pm)
 
     /* 4. 禁用 WiFi (ESP-NOW 在深睡时自动关闭) */
 
+    /* [审查修复] 深睡前清除 INT1 残留高电平, 防止秒醒
+     * GPIO 哑读: 强制拉低悬空电平, 确保 ext0 唤醒源干净 */
+    if (pm->cfg.sleep_cfg.wake_gpio > 0) {
+        gpio_config_t wake_io = {
+            .pin_bit_mask = (1ULL << pm->cfg.sleep_cfg.wake_gpio),
+            .mode = GPIO_MODE_INPUT,
+            .pull_up_en = GPIO_PULLUP_DISABLE,
+            .pull_down_en = GPIO_PULLDOWN_ENABLE,
+        };
+        gpio_config(&wake_io);
+        gpio_get_level(pm->cfg.sleep_cfg.wake_gpio);  /* 哑读清除 */
+        gpio_reset_pin(pm->cfg.sleep_cfg.wake_gpio);
+    }
+
     /* 5. 进入深睡 */
     pm->state = PM_WOM_SLEEP;
     ESP_LOGW(TAG, "进入 WoM Deep Sleep, 等待 IMU 动作唤醒...");

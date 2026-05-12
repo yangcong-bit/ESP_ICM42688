@@ -44,14 +44,13 @@ void eskf_predict(eskf_t *eskf, eskf_nominal_state_t *nominal, const float gyro[
         nominal->q[2] *= inv_n; nominal->q[3] *= inv_n;
     }
 
-    /* [Fix 3] 大矩阵移至 .bss 段: 4×6×6×4B = 576B 从 Stack 卸载到静态区
-     * static 变量需显式 memset 清零, 仅 F 需要 (P_flat/P_next/F_T 被完全覆盖) */
-    static ALIGN_16 float F[6][6];
-    static ALIGN_16 float P_flat[6][6];
-    static ALIGN_16 float P_next[6][6];
-    static ALIGN_16 float F_T[6][6];
+    /* [审查修复] 工作区矩阵从 static 移入 eskf_t 结构体, 支持多实例重入 */
+    float (*F)[6]     = (float (*)[6])eskf->workspace_F;
+    float (*P_flat)[6]= (float (*)[6])eskf->workspace_P_flat;
+    float (*P_next)[6]= (float (*)[6])eskf->workspace_P_next;
+    float (*F_T)[6]   = (float (*)[6])eskf->workspace_F_T;
 
-    memset(F, 0, sizeof(F));
+    memset(F, 0, sizeof(eskf->workspace_F));
     for (int i = 0; i < 6; i++) F[i][i] = 1.0f;
     F[0][1] =  wz * dt;  F[0][2] = -wy * dt;  F[0][3] = -dt;
     F[1][0] = -wz * dt;  F[1][2] =  wx * dt;  F[1][4] = -dt;
@@ -118,19 +117,19 @@ void eskf_update_accel(eskf_t *eskf, eskf_nominal_state_t *nominal, const float 
 
     float y[3] = { z[0] - g_pred[0], z[1] - g_pred[1], z[2] - g_pred[2] };
 
-    /* [Fix 3] H/h_row/PHt/K 移至 .bss 段 */
-    static ALIGN_16 float H[3][6];
+    /* [审查修复] 工作区从 static 移入 eskf_t, 支持多实例重入 */
+    float (*H)[6] = (float (*)[6])eskf->workspace_H;
     H[0][0] = 0.0f;       H[0][1] = -g_pred[2]; H[0][2] = g_pred[1];
     H[1][0] = g_pred[2];  H[1][1] = 0.0f;       H[1][2] = -g_pred[0];
     H[2][0] = -g_pred[1]; H[2][1] = g_pred[0];  H[2][2] = 0.0f;
     for (int a = 0; a < 3; a++) { H[a][3] = 0.0f; H[a][4] = 0.0f; H[a][5] = 0.0f; }
 
     for (int axis = 0; axis < 3; axis++) {
-        static ALIGN_16 float h_row[6];
+        float *h_row = eskf->workspace_h_row;
         for (int j = 0; j < 6; j++) h_row[j] = H[axis][j];
 
-        /* PHt = P * H^T: 逐行点积 (SIMD, .bss 对齐) */
-        static ALIGN_16 float PHt[6];
+        /* PHt = P * H^T: 逐行点积 (SIMD) */
+        float *PHt = eskf->workspace_PHt;
         for (int i = 0; i < 6; i++) {
             dsps_dotprod_f32(&eskf->P[i][0], h_row, &PHt[i], 6);
         }
@@ -140,9 +139,9 @@ void eskf_update_accel(eskf_t *eskf, eskf_nominal_state_t *nominal, const float 
         dsps_dotprod_f32(h_row, PHt, &s_tmp, 6);
         float S = eskf->noise_accel + s_tmp;
 
-        /* K = PHt / S (.bss 对齐) */
+        /* K = PHt / S */
         float inv_S = 1.0f / S;
-        static ALIGN_16 float K[6];
+        float *K = eskf->workspace_K;
         for (int i = 0; i < 6; i++) K[i] = PHt[i] * inv_S;
 
         /* innovation = y - H * dx (SIMD 点积) */
@@ -153,8 +152,8 @@ void eskf_update_accel(eskf_t *eskf, eskf_nominal_state_t *nominal, const float 
         /* dx += K * innovation */
         for (int i = 0; i < 6; i++) eskf->dx[i] += K[i] * innovation;
 
-        /* Hp = H * P: 1x6 × 6x6 = 1x6 (标量展开, .bss) */
-        static float Hp[6];
+        /* Hp = H * P: 1x6 × 6x6 = 1x6 (标量展开) */
+        float *Hp = eskf->workspace_Hp;
         for (int j = 0; j < 6; j++) {
             Hp[j] = h_row[0]*eskf->P[0][j] + h_row[1]*eskf->P[1][j]
                   + h_row[2]*eskf->P[2][j] + h_row[3]*eskf->P[3][j]

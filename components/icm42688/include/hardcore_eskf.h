@@ -19,9 +19,7 @@ typedef struct {
 typedef struct {
     float dx[6];     // 误差状态：[角度误差x, y, z, 零偏误差x, y, z]
 
-    /* [F15 Task 2.1] P[6][8]: 每行 32 字节 (8×4), 保证所有行首地址 16 字节对齐
-     * ESP32-S3 PIE 128-bit SIMD 要求操作数 16 字节对齐。
-     * 算法中访问 P[i][j] 时, 循环仍使用 j < 6, 仅 padding 区域不使用。 */
+    /* [F15 Task 2.1] P[6][8]: 每行 32 字节, 保证行首 16 字节对齐 */
     float P[6][8];   // 6x8 协方差矩阵 (有效区域 6x6, 每行 padding 2 float)
     
     // 系统噪声矩阵参数 (Q)
@@ -30,6 +28,19 @@ typedef struct {
     
     // 测量噪声矩阵参数 (R - 加速度计)
     float noise_accel;
+
+    /* [审查修复] 预分配工作区矩阵: 消除 static 依赖, 支持多实例重入
+     * 将 eskf_predict/update_accel 中的中间矩阵从 static 移入结构体,
+     * 避免两个 ESKF 实例交替覆写导致算法崩溃 */
+    float workspace_F[6][6];      __attribute__((aligned(16)))
+    float workspace_P_flat[6][6];  __attribute__((aligned(16)))
+    float workspace_P_next[6][6];  __attribute__((aligned(16)))
+    float workspace_F_T[6][6];     __attribute__((aligned(16)))
+    float workspace_H[3][6];       __attribute__((aligned(16)))
+    float workspace_h_row[6];      __attribute__((aligned(16)))
+    float workspace_PHt[6];        __attribute__((aligned(16)))
+    float workspace_K[6];          __attribute__((aligned(16)))
+    float workspace_Hp[6];
 } __attribute__((aligned(16))) eskf_t;
 
 // 初始化滤波器
