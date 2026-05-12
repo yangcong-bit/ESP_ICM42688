@@ -196,6 +196,16 @@ static bool wifi_lowlevel_init(void)
         return false;
     }
 
+    /* 强制提升 ESP-NOW PHY 发送速率: 1Mbps(默认) → 24Mbps
+     * 250B 包占用时间从 ~2000μs 降至 ~100μs, 释放信道容量
+     * 代价: 穿墙能力略降, 室内动捕场景影响极小 */
+    esp_err_t rate_err = esp_wifi_config_espnow_rate(WIFI_IF_STA, WIFI_PHY_RATE_24M);
+    if (rate_err == ESP_OK) {
+        ESP_LOGI(TAG, "ESP-NOW PHY Rate 提速至 24Mbps");
+    } else {
+        ESP_LOGW(TAG, "ESP-NOW 提速失败: %s (保持默认 1Mbps)", esp_err_to_name(rate_err));
+    }
+
     /* 获取本机 MAC 地址 */
     uint8_t mac[ESP_NOW_ETH_ALEN];
     esp_wifi_get_mac(WIFI_IF_STA, mac);
