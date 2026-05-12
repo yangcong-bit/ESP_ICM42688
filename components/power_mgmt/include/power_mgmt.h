@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "soc/soc.h"
+#include "esp_pm.h"  /* [Fix 1] esp_pm_lock_handle_t */
 
 #ifdef __cplusplus
 extern "C" {
@@ -66,6 +67,9 @@ typedef struct {
 
     /* DFS 统计 */
     uint32_t        dfs_switch_count;
+
+    /* [Fix 1] ESP-IDF PM 锁: 替代手动 rtc_clk_cpu_freq_set_config */
+    esp_pm_lock_handle_t cpu_freq_lock;
 } pm_ctx_t;
 
 /* ============================================================

@@ -15,44 +15,14 @@
 #include "driver/gpio.h"
 #include "esp_timer.h"
 #include "ulp_riscv.h"
-#include "power_mgmt_ulp.h"  /* [修复] 构建系统自动生成的 ULP 共享符号头文件 */
+#include "power_mgmt_ulp.h"
 #include "rom/ets_sys.h"
 #include <math.h>
 #include <string.h>
 
 static const char *TAG = "power_mgmt";
 
-/* ============================================================
- *  内部辅助: DFS 切换
- * ============================================================ */
-static void set_cpu_freq(uint32_t mhz)
-{
-#if CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240
-    /* 只有配置了 240MHz 才能动态切换 */
-    rtc_cpu_freq_config_t config;
-    rtc_clk_cpu_freq_get_config(&config);
-
-    uint32_t cur_mhz = config.freq_mhz;
-    if (cur_mhz == mhz) return;
-
-    rtc_cpu_freq_config_t target = config;
-    target.freq_mhz = mhz;
-    /* 根据频率选择对应的分频器 */
-    if (mhz >= 240) {
-        target.div = RTC_CPU_FREQ_SRC_240M;
-        target.freq_mhz = 240;
-    } else if (mhz >= 160) {
-        target.div = RTC_CPU_FREQ_SRC_160M;
-        target.freq_mhz = 160;
-    } else {
-        target.div = RTC_CPU_FREQ_SRC_80M;
-        target.freq_mhz = 80;
-    }
-
-    rtc_clk_cpu_freq_set_config(&target);
-    ESP_LOGD(TAG, "CPU freq: %lu → %lu MHz", (unsigned long)cur_mhz, (unsigned long)target.freq_mhz);
-#endif
-}
+/* [Fix 1] 移除手动 set_cpu_freq, 改用 ESP-IDF PM 锁机制 */
 
 /* ============================================================
  *  API — 初始化
@@ -76,12 +46,27 @@ void pm_init(pm_ctx_t *pm, const pm_cfg_t *cfg)
         pm->cfg.sleep_cfg.wake_gpio           = 0;      /* 未配置 */
     }
 
-    pm->still_threshold = pm->cfg.sleep_cfg.sleep_delay_ms;  /* 1ms/帧 → ms 直接对比 */
+    pm->still_threshold = pm->cfg.sleep_cfg.sleep_delay_ms;
     pm->state = PM_ACTIVE;
 
-    ESP_LOGI(TAG, "Power Mgmt: DFS %lu→%lu MHz, DeadZone=%.1fV, Wake=%.1fV, Stillness=%lums",
-             (unsigned long)pm->cfg.active_freq_mhz,
-             (unsigned long)pm->cfg.idle_freq_mhz,
+    /* [Fix 1] ESP-IDF PM 初始化: 自动管理 CPU 频率切换 */
+#if CONFIG_PM_ENABLE
+    esp_pm_config_t pm_config = {
+        .max_freq_mhz = 240,
+        .min_freq_mhz = 80,
+        .light_sleep_enable = false,
+    };
+    ESP_ERROR_CHECK(esp_pm_configure(&pm_config));
+
+    ESP_ERROR_CHECK(esp_pm_lock_create(
+        ESP_PM_CPU_FREQ_MAX, 0, "imu_eskf_lock", &pm->cpu_freq_lock));
+    ESP_LOGI(TAG, "ESP-IDF PM lock created: CPU 80~240MHz auto-scaling");
+#else
+    ESP_LOGW(TAG, "CONFIG_PM_ENABLE not set, DFS disabled");
+    pm->cpu_freq_lock = NULL;
+#endif
+
+    ESP_LOGI(TAG, "Power Mgmt: PM active, DeadZone=%.1fV, Wake=%.1fV, Stillness=%lums",
              pm->cfg.dead_zone_voltage,
              pm->cfg.wake_voltage,
              (unsigned long)pm->cfg.sleep_cfg.sleep_delay_ms);
@@ -93,7 +78,9 @@ void pm_init(pm_ctx_t *pm, const pm_cfg_t *cfg)
 void pm_enter_active(pm_ctx_t *pm)
 {
     if (!pm || pm->state == PM_ACTIVE) return;
-    set_cpu_freq(pm->cfg.active_freq_mhz);
+#if CONFIG_PM_ENABLE
+    if (pm->cpu_freq_lock) esp_pm_lock_acquire(pm->cpu_freq_lock);
+#endif
     pm->state = PM_ACTIVE;
     pm->dfs_switch_count++;
 }
@@ -101,7 +88,9 @@ void pm_enter_active(pm_ctx_t *pm)
 void pm_enter_idle(pm_ctx_t *pm)
 {
     if (!pm || pm->state == PM_IDLE) return;
-    set_cpu_freq(pm->cfg.idle_freq_mhz);
+#if CONFIG_PM_ENABLE
+    if (pm->cpu_freq_lock) esp_pm_lock_release(pm->cpu_freq_lock);
+#endif
     pm->state = PM_IDLE;
     pm->dfs_switch_count++;
 }

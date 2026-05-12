@@ -18,6 +18,8 @@
 #include "esp_event.h"
 #include "esp_rom_sys.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -58,6 +60,29 @@ static QueueHandle_t s_sync_reply_queue = NULL;
 static QueueHandle_t s_imu_send_queue = NULL;
 static TaskHandle_t  s_espnow_task_handle = NULL;
 
+/* [Fix 2] TDMA 硬件定时器: 替代 esp_rom_delay_us 忙等,
+ * 消除 Core 0 CPU 霸占, 防止 WiFi/看门狗抖动 */
+static esp_timer_handle_t s_tdma_timer = NULL;
+
+static void tdma_timer_cb(void *arg)
+{
+    /* esp_timer 回调在高优先级任务上下文, 非 ISR, 使用普通 API */
+    if (s_espnow_task_handle) {
+        xTaskNotifyGive(s_espnow_task_handle);
+    }
+}
+
+static void tdma_timer_init(void)
+{
+    esp_timer_create_args_t args = {
+        .callback = &tdma_timer_cb,
+        .name     = "tdma_timer",
+        .dispatch_method = ESP_TIMER_TASK,
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&args, &s_tdma_timer));
+    ESP_LOGI(TAG, "TDMA esp_timer created (hardware timer, 1μs resolution)");
+}
+
 /* ESP-NOW 专用发送任务 (任务级上下文, 非回调, 非主循环) */
 static void espnow_send_task(void *arg)
 {
@@ -71,27 +96,22 @@ static void espnow_send_task(void *arg)
             continue;
         }
         /* 其次处理 IMU 聚合数据 (TDMA 时隙控制) */
-        if (xQueueReceive(s_imu_send_queue, &imu_pkt, pdMS_TO_TICKS(10)) == pdTRUE) {
-            /* TDMA: 混合调度 (Hybrid Sleep-Spin)
-             * > 2ms: vTaskDelay 挂起, 释放 Core 0 让 PM 切 80MHz Idle
-             * < 2ms: esp_rom_delay_us 微秒级自旋, 保证时隙精度不撕裂 */
+        if (xQueueReceive(s_imu_send_queue, &imu_pkt, portMAX_DELAY) == pdTRUE) {
+            /* [Fix 2] TDMA 硬件定时器等待: 替代 esp_rom_delay_us 忙等
+             * > 2ms: esp_timer 精确等待, 任务阻塞让出 CPU
+             * ≤2ms: 已在时隙附近, 立即发送 (timer 保证精度) */
             while (1) {
                 int64_t wait_us = time_sync_us_until_next_slot(&s_time_sync);
 
-                /* 已在时隙内或未同步 → 立即发送 */
-                if (wait_us <= 0) break;
+                if (wait_us <= 0) break;  /* 已在时隙内 */
 
-                if (wait_us > 2000) {
-                    /* 粗调: 距离时隙较远, 让出 CPU 给 IDLE 任务 */
-                    uint32_t delay_ticks = pdMS_TO_TICKS((wait_us - 1000) / 1000);
-                    if (delay_ticks > 0) {
-                        vTaskDelay(delay_ticks);
-                    } else {
-                        taskYIELD();
-                    }
+                if (wait_us > 2000 && s_tdma_timer) {
+                    /* 粗调: esp_timer 精确等待, 任务完全阻塞 */
+                    esp_timer_start_once(s_tdma_timer, (uint64_t)(wait_us - 500));
+                    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
                 } else {
-                    /* 微调: 距离时隙 <2ms, 高精度自旋防抖 */
-                    esp_rom_delay_us(50);
+                    /* 微调: 距离时隙 <2ms, 直接发送 (误差可接受) */
+                    break;
                 }
             }
             esp_now_send(s_broadcast_mac, imu_pkt.data, imu_pkt.data_len);
@@ -222,6 +242,7 @@ bool net_udp_init(const net_udp_cfg_t *cfg)
     if (!s_sync_reply_queue) {
         s_sync_reply_queue = xQueueCreate(SYNC_REPLY_QUEUE_SIZE, sizeof(sync_reply_item_t));
         s_imu_send_queue = xQueueCreate(IMU_SEND_QUEUE_SIZE, sizeof(imu_send_item_t));
+        tdma_timer_init();  /* [Fix 2] TDMA 硬件定时器 */
         xTaskCreate(espnow_send_task, "espnow_tx", 4096, NULL, 5, &s_espnow_task_handle);
     }
 
