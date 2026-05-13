@@ -83,6 +83,7 @@ typedef struct {
     eskf_t           eskf_fused;           /* 融合后 ESKF 滤波器 */
     eskf_nominal_state_t eskf_state_fused; /* ESKF 标称状态 */
     uint64_t         last_update_us;       /* 上次 ESKF 更新时间 (用于计算 dt) */
+    float            current_alpha;        /* [平滑降级] 当前融合权重 (IIR 滤波) */
     mat3_t           R_align;       /* 安装对齐旋转矩阵 */
     bool             initialized;
     uint32_t         fused_count;

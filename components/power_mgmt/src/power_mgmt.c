@@ -122,9 +122,13 @@ bool pm_check_stillness(pm_ctx_t *pm, const float accel_g[3], const float gyro_d
             return true;  /* 触发休眠 */
         }
     } else {
-        /* 一旦有运动, 重置计数器 */
-        if (pm->still_count > 0) {
-            pm->still_count = 0;
+        /* [漏桶算法] 运动时不瞬间清零, 而是快速衰减
+         * 每帧噪点扣除 100 帧静止累积 (约 100ms)
+         * 容忍 <10% 占空比的尖峰噪点, 保证 30s 休眠倒计时延续 */
+        if (pm->still_count > 100) {
+            pm->still_count -= 100;
+        } else {
+            pm->still_count = 0;  /* 连续真实震动会迅速清零 */
         }
     }
     return false;

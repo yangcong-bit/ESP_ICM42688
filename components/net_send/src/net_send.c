@@ -60,6 +60,9 @@ static QueueHandle_t s_sync_reply_queue = NULL;
 static QueueHandle_t s_imu_send_queue = NULL;
 static TaskHandle_t  s_espnow_task_handle = NULL;
 
+/* [临界区] TDMA 微调阶段的自旋锁, 屏蔽中断防止 Tick 抢占 */
+static portMUX_TYPE s_tdma_mux = portMUX_INITIALIZER_UNLOCKED;
+
 /* ESP-NOW 专用发送任务 (任务级上下文, 非回调, 非主循环) */
 static void espnow_send_task(void *arg)
 {
@@ -92,12 +95,18 @@ static void espnow_send_task(void *arg)
                         vTaskDelay(delay_ticks);
                     }
                 } else {
-                    /* 微调: 最后 ≤500μs, ROM 延时精确踩点 */
+                    /* 微调: 最后 ≤500μs, 进入临界区精确踩点并发送
+                     * taskENTER_CRITICAL 屏蔽中断, 将发送抖动压至个位数微秒 */
+                    taskENTER_CRITICAL(&s_tdma_mux);
                     esp_rom_delay_us((uint32_t)wait_us);
-                    break;
+                    esp_now_send(s_broadcast_mac, imu_pkt.data, imu_pkt.data_len);
+                    taskEXIT_CRITICAL(&s_tdma_mux);
+                    goto send_done;  /* 已发送, 跳出 */
                 }
             }
+            /* wait_us <= 0 直接 break 时, 在临界区外补发 */
             esp_now_send(s_broadcast_mac, imu_pkt.data, imu_pkt.data_len);
+            send_done:;
         }
     }
 }

@@ -1,7 +1,12 @@
 #include "hardcore_eskf.h"
 #include "dspm_mult.h"
 #include "esp_dsp.h"
+#include "esp_attr.h"
 #include <string.h>
+
+/* [ROM sqrtf] 使用编译器内建 __builtin_sqrtf (硬件 FPU 指令)
+ * Xtensa ESP32-S3 有硬件浮点单元, __builtin_sqrtf 直接生成 FSQRT 指令,
+ * 不调用 Flash 中的 libm, 无 Cache 依赖, 可安全在 IRAM 中执行 */
 
 void eskf_init(eskf_t *eskf, eskf_nominal_state_t *nominal) {
     nominal->q[0] = 1.0f;
@@ -17,11 +22,8 @@ void eskf_init(eskf_t *eskf, eskf_nominal_state_t *nominal) {
     eskf->noise_accel = 0.05f;
 }
 
-/* 预测步: P = F * P * F^T + Q (SIMD 加速) */
-/* [F15 Task 2.3] 移除 IRAM_ATTR: sqrtf() 调用 Flash 中的标准库,
- * 若 Cache 关闭 (Flash 擦写) 会触发 Cache Panic。
- * 依赖 -O3 指令 Cache 即可, 不需要常驻 IRAM。 */
-void eskf_predict(eskf_t *eskf, eskf_nominal_state_t *nominal, const float gyro[3], float dt) {
+/* 预测步: P = F * P * F^T + Q (SIMD 加速, IRAM 常驻) */
+void IRAM_ATTR eskf_predict(eskf_t *eskf, eskf_nominal_state_t *nominal, const float gyro[3], float dt) {
     float wx = gyro[0] - nominal->bg[0];
     float wy = gyro[1] - nominal->bg[1];
     float wz = gyro[2] - nominal->bg[2];
@@ -35,9 +37,9 @@ void eskf_predict(eskf_t *eskf, eskf_nominal_state_t *nominal, const float gyro[
     nominal->q[2] += half_dt * ( q_z*wx + q_w*wy - q_x*wz);
     nominal->q[3] += half_dt * (-q_y*wx + q_x*wy + q_w*wz);
 
-    /* 归一化 */
+    /* 归一化 (硬件 FPU FSQRT, 无 Flash 依赖) */
     ALIGN_16 float q_buf[4] = { nominal->q[0], nominal->q[1], nominal->q[2], nominal->q[3] };
-    float qn = sqrtf(q_buf[0]*q_buf[0] + q_buf[1]*q_buf[1] + q_buf[2]*q_buf[2] + q_buf[3]*q_buf[3]);
+    float qn = __builtin_sqrtf(q_buf[0]*q_buf[0] + q_buf[1]*q_buf[1] + q_buf[2]*q_buf[2] + q_buf[3]*q_buf[3]);
     if (qn > 1e-8f) {
         float inv_n = 1.0f / qn;
         nominal->q[0] *= inv_n; nominal->q[1] *= inv_n;
@@ -97,13 +99,12 @@ void eskf_predict(eskf_t *eskf, eskf_nominal_state_t *nominal, const float gyro[
     }
 }
 
-/* 更新步: 序贯更新 (SIMD 加速) */
-/* [F15 Task 2.3] 移除 IRAM_ATTR (同上, sqrtf 依赖 Flash Cache) */
-void eskf_update_accel(eskf_t *eskf, eskf_nominal_state_t *nominal, const float accel[3]) {
-    if (isnan(accel[0]) || isnan(accel[1]) || isnan(accel[2])) return;
-    float a_norm = sqrtf(accel[0]*accel[0] + accel[1]*accel[1] + accel[2]*accel[2]);
-    if (a_norm < 0.1f) return;
-    if (a_norm > 16.0f) return;
+/* 更新步: 序贯更新 (SIMD 加速, IRAM 常驻) */
+void IRAM_ATTR eskf_update_accel(eskf_t *eskf, eskf_nominal_state_t *nominal, const float accel[3]) {
+    /* [ROM] 移除 isnan (Flash), 改用范围过滤: 0.1g~16g 对应 a_norm2 0.01~256 */
+    float a_norm2 = accel[0]*accel[0] + accel[1]*accel[1] + accel[2]*accel[2];
+    if (a_norm2 < 0.01f || a_norm2 > 256.0f) return;
+    float a_norm = __builtin_sqrtf(a_norm2);
     float inv_a = 1.0f / a_norm;
     float z[3] = { accel[0]*inv_a, accel[1]*inv_a, accel[2]*inv_a };
 
@@ -178,9 +179,9 @@ void eskf_update_accel(eskf_t *eskf, eskf_nominal_state_t *nominal, const float 
     nominal->q[2] = q0*dq[2] - q1*dq[3] + q2*dq[0] + q3*dq[1];
     nominal->q[3] = q0*dq[3] + q1*dq[2] - q2*dq[1] + q3*dq[0];
 
-    /* 归一化 */
+    /* 归一化 (硬件 FPU FSQRT, 无 Flash 依赖) */
     ALIGN_16 float q_buf[4] = { nominal->q[0], nominal->q[1], nominal->q[2], nominal->q[3] };
-    float qn = sqrtf(q_buf[0]*q_buf[0] + q_buf[1]*q_buf[1] + q_buf[2]*q_buf[2] + q_buf[3]*q_buf[3]);
+    float qn = __builtin_sqrtf(q_buf[0]*q_buf[0] + q_buf[1]*q_buf[1] + q_buf[2]*q_buf[2] + q_buf[3]*q_buf[3]);
     if (qn > 1e-8f) {
         float inv_n = 1.0f / qn;
         nominal->q[0] *= inv_n; nominal->q[1] *= inv_n;

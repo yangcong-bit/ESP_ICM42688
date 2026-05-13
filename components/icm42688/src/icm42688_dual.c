@@ -136,6 +136,7 @@ icm42688_err_t dual_imu_init(dual_imu_dev_t *dev,
         def_cfg = *cfg;
     }
     dev->cfg = def_cfg;
+    dev->current_alpha = def_cfg.alpha;  /* [平滑降级] 初始融合权重 */
 
     /* 关联设备 */
     dev->imu[0].dev   = imu_a;
@@ -275,27 +276,26 @@ icm42688_err_t dual_imu_update(dual_imu_dev_t *dev,
         gyro_b.z -= dev->imu[1].gyro_bias_run.z;
     }
 
-    /* ---- 5. 加权融合 ---- */
-    float alpha = dev->cfg.alpha;
+    /* ---- 5. 加权融合 (带平滑降级) ---- */
+    float target_alpha = dev->cfg.alpha;
+    if (cross_ok_a && cross_ok_b) {
+        target_alpha = dev->cfg.alpha;     /* 双路正常: 目标为设定值 (默认 0.5) */
+    } else if (cross_ok_a) {
+        target_alpha = 1.0f;               /* 仅 A 有效: 完全信任 A */
+    } else if (cross_ok_b) {
+        target_alpha = 0.0f;               /* 仅 B 有效: 完全信任 B */
+    }
+    /* 一阶 IIR 低通: 每次 1% 逼近目标, 约 200ms 完成平滑切换 */
+    dev->current_alpha = dev->current_alpha * 0.99f + target_alpha * 0.01f;
+    float alpha = dev->current_alpha;
     icm42688_axis3f_t accel_fused, gyro_fused;
 
-    if (cross_ok_a && cross_ok_b) {
-        /* 双路正常: 加权平均 */
-        accel_fused.x = alpha * accel_a.x + (1.0f - alpha) * accel_b.x;
-        accel_fused.y = alpha * accel_a.y + (1.0f - alpha) * accel_b.y;
-        accel_fused.z = alpha * accel_a.z + (1.0f - alpha) * accel_b.z;
-        gyro_fused.x  = alpha * gyro_a.x  + (1.0f - alpha) * gyro_b.x;
-        gyro_fused.y  = alpha * gyro_a.y  + (1.0f - alpha) * gyro_b.y;
-        gyro_fused.z  = alpha * gyro_a.z  + (1.0f - alpha) * gyro_b.z;
-    } else if (cross_ok_a) {
-        /* 仅 A 有效 */
-        accel_fused = accel_a;
-        gyro_fused  = gyro_a;
-    } else {
-        /* 仅 B 有效 */
-        accel_fused = accel_b;
-        gyro_fused  = gyro_b;
-    }
+    accel_fused.x = alpha * accel_a.x + (1.0f - alpha) * accel_b.x;
+    accel_fused.y = alpha * accel_a.y + (1.0f - alpha) * accel_b.y;
+    accel_fused.z = alpha * accel_a.z + (1.0f - alpha) * accel_b.z;
+    gyro_fused.x  = alpha * gyro_a.x  + (1.0f - alpha) * gyro_b.x;
+    gyro_fused.y  = alpha * gyro_a.y  + (1.0f - alpha) * gyro_b.y;
+    gyro_fused.z  = alpha * gyro_a.z  + (1.0f - alpha) * gyro_b.z;
 
     /* ---- 6. 置信度计算 ---- */
     if (cross_ok_a && cross_ok_b) {
@@ -307,7 +307,8 @@ icm42688_err_t dual_imu_update(dual_imu_dev_t *dev,
         if (diff_score > 1.0f) diff_score = 1.0f;
         result->confidence = diff_score;
     } else if (cross_ok_a || cross_ok_b) {
-        result->confidence = 0.5f;  /* 单路工作 */
+        /* [平滑] 置信度平缓下降至 0.5, 而非瞬间跳变 */
+        result->confidence = result->confidence * 0.95f + 0.5f * 0.05f;
     } else {
         result->confidence = 0.0f;
     }
