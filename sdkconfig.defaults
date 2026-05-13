@@ -54,3 +54,9 @@ CONFIG_FREERTOS_HZ=1000
 # ============================================================
 CONFIG_PM_ENABLE=y
 CONFIG_PM_DFS_INIT_AUTO=y
+
+# ============================================================
+#  SPI Flash: ROM 实现 + 自动挂起 (防止 ESKF Flash Cache Panic)
+# ============================================================
+CONFIG_SPI_FLASH_ROM_IMPL=y
+CONFIG_SPI_FLASH_AUTO_SUSPEND=y
