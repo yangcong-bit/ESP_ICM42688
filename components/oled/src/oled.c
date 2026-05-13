@@ -1,10 +1,13 @@
 /**
  * @file oled.c
- * @brief SSD1306 I2C 驱动 (64x32, ESP-IDF v5.x 遗留 I2C API)
+ * @brief SSD1306 I2C 驱动 (64x32, ESP-IDF 5.x 新版 I2C Master API)
+ *
+ * 迁移说明: 从弃用的 driver/i2c.h 迁移至 driver/i2c_master.h
+ * 新架构: Bus (总线) + Device (设备) 两级模型, 线程安全, 多设备共享
  */
 
 #include "oled.h"
-#include "driver/i2c.h"
+#include "driver/i2c_master.h"  /* [迁移] IDF 5.x 新版 I2C Master 驱动 */
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -16,22 +19,24 @@ static const char *TAG = "oled";
 /* 显存 Buffer: 64x32 / 8 = 256 字节 (Horizontal addressing) */
 static uint8_t s_buf[OLED_BUF_SIZE];
 
+/* [迁移] 新版 I2C 句柄: Bus + Device 两级架构 */
+static i2c_master_bus_handle_t s_i2c_bus_handle = NULL;
+static i2c_master_dev_handle_t s_oled_dev_handle = NULL;
+
 /* ============================================================
- *  I2C 底层写入
+ *  I2C 底层写入 (IDF 5.x 新 API)
  * ============================================================ */
 static esp_err_t oled_write_cmd(uint8_t cmd)
 {
     uint8_t buf[2] = { 0x00, cmd };  /* Co=0, D/C#=0 */
-    return i2c_master_write_to_device(OLED_I2C_PORT, OLED_I2C_ADDR,
-                                       buf, 2, pdMS_TO_TICKS(100));
+    return i2c_master_transmit(s_oled_dev_handle, buf, 2, 100);
 }
 
 __attribute__((unused))
 static esp_err_t oled_write_data(uint8_t data)
 {
     uint8_t buf[2] = { 0x40, data };  /* Co=0, D/C#=1 */
-    return i2c_master_write_to_device(OLED_I2C_PORT, OLED_I2C_ADDR,
-                                       buf, 2, pdMS_TO_TICKS(100));
+    return i2c_master_transmit(s_oled_dev_handle, buf, 2, 100);
 }
 
 static esp_err_t oled_write_data_bulk(const uint8_t *data, size_t len)
@@ -41,28 +46,47 @@ static esp_err_t oled_write_data_bulk(const uint8_t *data, size_t len)
     if (!tmp) return ESP_ERR_NO_MEM;
     tmp[0] = 0x40;
     memcpy(tmp + 1, data, len);
-    esp_err_t ret = i2c_master_write_to_device(OLED_I2C_PORT, OLED_I2C_ADDR,
-                                                tmp, len + 1, pdMS_TO_TICKS(500));
+    esp_err_t ret = i2c_master_transmit(s_oled_dev_handle, tmp, len + 1, 500);
     free(tmp);
     return ret;
 }
 
 /* ============================================================
- *  I2C 初始化
+ *  I2C 初始化 (IDF 5.x Bus+Device 架构)
  * ============================================================ */
 static esp_err_t i2c_master_init(void)
 {
-    i2c_config_t conf = {
-        .mode             = I2C_MODE_MASTER,
-        .sda_io_num       = OLED_PIN_SDA,
-        .scl_io_num       = OLED_PIN_SCL,
-        .sda_pullup_en    = GPIO_PULLUP_ENABLE,
-        .scl_pullup_en    = GPIO_PULLUP_ENABLE,
-        .master.clk_speed = OLED_I2C_FREQ,
+    /* 1. 创建 I2C 主机总线 */
+    i2c_master_bus_config_t bus_config = {
+        .i2c_port   = OLED_I2C_PORT,
+        .sda_io_num = OLED_PIN_SDA,
+        .scl_io_num = OLED_PIN_SCL,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .intr_priority     = 0,
+        .flags.enable_internal_pullup = true,
     };
-    ESP_ERROR_CHECK(i2c_param_config(OLED_I2C_PORT, &conf));
-    ESP_ERROR_CHECK(i2c_driver_install(OLED_I2C_PORT, conf.mode, 0, 0, 0));
-    ESP_LOGI(TAG, "I2C master init: SDA=%d SCL=%d @ %dHz",
+
+    esp_err_t ret = i2c_new_master_bus(&bus_config, &s_i2c_bus_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "I2C bus creation failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    /* 2. 向总线添加 OLED 设备 (自带地址 + 速率) */
+    i2c_device_config_t dev_config = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address  = OLED_I2C_ADDR,
+        .scl_speed_hz    = OLED_I2C_FREQ,
+    };
+
+    ret = i2c_master_bus_add_device(s_i2c_bus_handle, &dev_config, &s_oled_dev_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "I2C add device failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "I2C master v5.x init: SDA=%d SCL=%d @ %dHz",
              OLED_PIN_SDA, OLED_PIN_SCL, OLED_I2C_FREQ);
     return ESP_OK;
 }

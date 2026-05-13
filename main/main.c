@@ -52,22 +52,22 @@ static const char *TAG = "main";
  *  IMU-A 引脚 (SPI2, 根据原理图 2026-F9 重分配)
  *  全部迁移至 GPIO 16~20, 释放 Flash 引脚 (IO47/IO48)
  * ============================================================ */
-#define PIN_CS_A      20     /* CS1 */
-#define PIN_SCLK_A    19     /* SPI_CLK_A */
-#define PIN_MOSI_A    18     /* SPI_MOSI_A */
-#define PIN_MISO_A    17     /* SPI_MISO_A */
-#define PIN_INT_A     16     /* INT1_A */
+#define PIN_CS_A      16     /* CS1 */
+#define PIN_SCLK_A    15     /* SPI_CLK_A */
+#define PIN_MOSI_A    14     /* SPI_MOSI_A */
+#define PIN_MISO_A    13     /* SPI_MISO_A */
+#define PIN_INT_A     12     /* INT1_A */
 #define SPI_HOST_A    SPI2_HOST
 
 /* ============================================================
  *  IMU-B 引脚 (SPI3, 根据原理图 2026-F9 重分配)
  *  全部迁移至 GPIO 10~14, 与 IMU-A 物理隔离
  * ============================================================ */
-#define PIN_CS_B      10     /* CS2 */
-#define PIN_SCLK_B    11     /* SPI_CLK_B */
-#define PIN_MOSI_B    12     /* SPI_MOSI_B */
-#define PIN_MISO_B    13     /* SPI_MISO_B */
-#define PIN_INT_B     14     /* INT1_B */
+#define PIN_CS_B      6     /* CS2 */
+#define PIN_SCLK_B    7     /* SPI_CLK_B */
+#define PIN_MOSI_B    8     /* SPI_MOSI_B */
+#define PIN_MISO_B    9     /* SPI_MISO_B */
+#define PIN_INT_B     10     /* INT1_B */
 #define SPI_HOST_B    SPI3_HOST
 
 /* 节点 ID: 启动时从 MAC 地址低位自动推演, 无需硬编码 */
@@ -96,7 +96,7 @@ static uint8_t s_node_id = 0;
 /* ============================================================
  *  ESP32 硬件时钟树: 32.768kHz PWM → IMU CLKIN (物理锁相)
  * ============================================================ */
-#define PIN_IMU_CLKIN  21   /* 外部 32.768kHz 时钟驱动引脚 */
+#define PIN_IMU_CLKIN  11   /* 外部 32.768kHz 时钟驱动引脚 */
 
 static void imu_master_clock_init(void)
 {
