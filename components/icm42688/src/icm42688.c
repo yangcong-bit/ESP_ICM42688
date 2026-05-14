@@ -222,8 +222,9 @@ icm42688_err_t icm42688_init(icm42688_dev_t *dev,
 {
     if (!dev || !spi_cfg) return ICM42688_ERR_CONFIG;
 
-    /* 【修改1】将 err 的声明提到函数最前面，确保全函数可用 */
+    /* 【修改1】将 err 和 host_idx 声明提到函数最前面，确保全函数可用 */
     icm42688_err_t err = ICM42688_OK;
+    int host_idx = -1;  /* dma_cleanup 中需要判断是否初始化了 SPI 总线 */
 
     memset(dev, 0, sizeof(*dev));
 
@@ -251,7 +252,7 @@ icm42688_err_t icm42688_init(icm42688_dev_t *dev,
     dev->cfg = def_cfg;
 
     /* ---- SPI 总线初始化 (仅首次, 共享总线场景) ---- */
-    int host_idx = spi_cfg->spi_host;
+    host_idx = spi_cfg->spi_host;
     esp_err_t ret;
     if (host_idx >= 0 && host_idx < SPI_HOST_MAX && !s_spi_bus_inited[host_idx]) {
         spi_bus_config_t bus_cfg = {
@@ -384,6 +385,14 @@ dma_cleanup:
     if (dev->spi_dev) {
         spi_bus_remove_device(dev->spi_dev);
         dev->spi_dev = NULL;
+    }
+    /* [Bug 4 修复] SPI 总线泄露: 如果本函数初始化了 SPI 总线但后续失败,
+     * 必须释放总线并重置跟踪标志, 防止重试时因 s_spi_bus_inited=true
+     * 跳过初始化, 导致后续 spi_bus_add_device 在无总线的 host 上崩溃 */
+    if (host_idx >= 0 && host_idx < SPI_HOST_MAX && s_spi_bus_inited[host_idx]) {
+        spi_bus_free(spi_cfg->spi_host);
+        s_spi_bus_inited[host_idx] = false;
+        ESP_LOGW(TAG, "SPI%d bus freed (init failed)", spi_cfg->spi_host);
     }
     if (dev->dma_tx_buf) heap_caps_free(dev->dma_tx_buf);
     if (dev->dma_rx_buf) heap_caps_free(dev->dma_rx_buf);

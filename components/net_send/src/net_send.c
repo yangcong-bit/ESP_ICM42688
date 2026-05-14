@@ -76,7 +76,7 @@ static void espnow_send_task(void *arg)
             continue;
         }
         /* 其次处理 IMU 聚合数据 (TDMA 时隙控制) */
-        if (xQueueReceive(s_imu_send_queue, &imu_pkt, portMAX_DELAY) == pdTRUE) {
+        if (xQueueReceive(s_imu_send_queue, &imu_pkt, pdMS_TO_TICKS(10)) == pdTRUE) {
             /* [修复] TDMA 混合调度: vTaskDelay 粗调 + esp_rom_delay_us 微调
              * > 500μs: vTaskDelay 挂起任务, 释放 CPU 给低优先级任务
              * ≤500μs: esp_rom_delay_us 死等精确踩点
@@ -95,13 +95,14 @@ static void espnow_send_task(void *arg)
                         vTaskDelay(delay_ticks);
                     }
                 } else {
-                    /* 微调: 最后 ≤500μs, 进入临界区精确踩点并发送
-                     * taskENTER_CRITICAL 屏蔽中断, 将发送抖动压至个位数微秒 */
+                    /* 微调: 最后 ≤500μs, 进入临界区精确踩点
+                     * esp_now_send 移出临界区: 它包含 Mutex/内存分配等复杂操作,
+                     * 在中断屏蔽状态下调用会触发 FreeRTOS 断言失败 */
                     taskENTER_CRITICAL(&s_tdma_mux);
                     esp_rom_delay_us((uint32_t)wait_us);
-                    esp_now_send(s_broadcast_mac, imu_pkt.data, imu_pkt.data_len);
                     taskEXIT_CRITICAL(&s_tdma_mux);
-                    goto send_done;  /* 已发送, 跳出 */
+                    esp_now_send(s_broadcast_mac, imu_pkt.data, imu_pkt.data_len);
+                    goto send_done;
                 }
             }
             /* wait_us <= 0 直接 break 时, 在临界区外补发 */
